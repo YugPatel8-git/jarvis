@@ -1,4 +1,4 @@
-import type { AskHandlers } from './anthropic'
+import type { AskHandlers } from './brain'
 import type { Blade, Panel } from '../store'
 import { BRIDGE_WS_URL } from '../config'
 
@@ -6,10 +6,9 @@ import { BRIDGE_WS_URL } from '../config'
  * Client for the local bridge (see bridge/server.mjs).
  *
  * Same `ask()` shape as the browser-direct path, so App.tsx doesn't care which
- * brain is behind it. The difference is what's reachable: this one runs on your
- * machine, so every MCP server in your Claude Code config is in play.
+ * brain is behind it. Codex authentication remains inside the local CLI.
  *
- * The socket is the session. The bridge holds one Claude Agent SDK query per
+ * The socket is the session. The bridge reuses one Codex CLI session per
  * connection and the whole conversation lives inside it, so a dropped socket
  * silently wipes JARVIS's memory of the exchange while the transcript on screen
  * still shows it. That is why the reconnect below is loud rather than
@@ -169,9 +168,7 @@ function dispatch(ws: WebSocket) {
     }
 
     if (msg.type === 'ready') {
-      // The bridge announces immediately on connect from Claude Code's config,
-      // then again with live status once the agent initialises. Keep listening
-      // so the later, more accurate list wins.
+      // Keep listening so a future bridge can refine its capability list.
       servers = (msg.servers ?? [])
         .map((s) => (typeof s === 'string' ? s : (s.name ?? '')))
         .filter(Boolean)
