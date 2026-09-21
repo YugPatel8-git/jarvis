@@ -30,6 +30,9 @@ type Frame = {
   id?: string
   ask?: string
   reason?: string
+  action?: string
+  affects?: string
+  irreversible?: boolean
   mode?: string
   seconds?: number
   when?: string
@@ -200,6 +203,17 @@ function dispatch(ws: WebSocket) {
           .then(reply)
           .catch((err) => reply({ error: String(err?.message ?? err) }))
       }
+    } else if (msg.type === 'approval' && msg.id) {
+      const details = [
+        `JARVIS plans to: ${msg.action ?? 'perform a high-risk action'}`,
+        `Affected: ${msg.affects ?? 'the named target'}`,
+        `Why: ${msg.reason ?? 'required to complete the request'}`,
+        `External or irreversible consequence: ${msg.irreversible ? 'Yes' : 'Possible external consequence'}`,
+        '',
+        'Do you want me to proceed?',
+      ].join('\n')
+      const approved = window.confirm(details)
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'approval-reply', id: msg.id, approved }))
     } else if (msg.type === 'ui' && msg.op) {
       // A `ui` frame with no args is normal — reset and clear take none — so an
       // absent args object is an empty one, not a reason to drop the command.
