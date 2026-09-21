@@ -8,6 +8,7 @@ const response=(v)=>({content:[{type:'text',text:JSON.stringify(v)}]})
 const tool=(name,description,schema)=>server.tool(name,description,schema,async(a)=>{
   const v=await callRouter(name,a)
   if(name==='vision'&&v?.data)return {content:[{type:'text',text:'Camera capture requested by the user.'},{type:'image',data:v.data,mimeType:v.mimeType??'image/jpeg'}]}
+  if(name==='browser'&&v?.image)return {content:[{type:'text',text:'Screenshot of the current isolated Chrome tab.'},{type:'image',data:v.image,mimeType:v.mimeType??'image/jpeg'}]}
   return response(v)
 })
 tool('browser','Control an isolated local Chrome profile: open/navigate/search tabs, click ordinary selectors, scroll, read, or screenshot.',{
