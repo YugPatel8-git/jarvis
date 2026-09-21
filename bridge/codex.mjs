@@ -12,11 +12,13 @@ thirty words. Use plain spoken prose only: no markdown, headings, bullets,
 code fences, URLs, raw JSON, or emoji. Be dry, precise, calmly competent, and
 occasionally address the user as sir. Do not claim to have used tools.
 
-You are running as a conversation engine in a read-only sandbox. Do not run
-commands, inspect files, browse, use MCP servers, or attempt to change the
-machine. If a request needs a capability you do not have, state that constraint
-briefly. Never ask for an API key. Your authentication is managed by the local
-Codex CLI and must never be discussed or exposed.`
+Your only machine capabilities are the tools from the jarvis MCP server. Use
+them when the user asks you to act. Never try to bypass that server with your
+built-in shell: the Codex sandbox is deliberately read-only. The router executes
+normal actions immediately and independently pauses high-risk actions for the
+user's explicit approval. Do not claim success until the tool returns success.
+Use camera vision only when the user asks you to look. Never ask for an API key.
+Authentication is managed by the local Codex CLI and must never be exposed.`
 
 function commandFor(args) {
   if (process.platform !== 'win32') return { command: 'codex', args }
@@ -40,10 +42,11 @@ function textFromEvent(event) {
 }
 
 export class CodexConversation {
-  constructor({ cwd, onText, onTool }) {
+  constructor({ cwd, onText, onTool, routerToken }) {
     this.cwd = cwd
     this.onText = onText
     this.onTool = onTool
+    this.routerToken = routerToken
     this.sessionId = null
     this.child = null
     this.cancelled = false
@@ -53,9 +56,16 @@ export class CodexConversation {
     if (this.child) throw new Error('Codex is already answering')
     this.cancelled = false
 
+    const mcpFile = new URL('./mcp-server.mjs', import.meta.url)
     const common = [
       '--sandbox', 'read-only',
       '--ask-for-approval', 'never',
+      '-c', `mcp_servers.jarvis.command=${JSON.stringify(process.execPath)}`,
+      '-c', `mcp_servers.jarvis.args=${JSON.stringify([decodeURIComponent(mcpFile.pathname.replace(/^\/(?:[A-Za-z]:)/, (m) => m.slice(1))).replaceAll('/', '\\\\')])}`,
+      '-c', 'mcp_servers.jarvis.env_vars=["JARVIS_ROUTER_TOKEN","JARVIS_BRIDGE_PORT"]',
+      '-c', 'mcp_servers.jarvis.required=true',
+      '-c', 'mcp_servers.jarvis.default_tools_approval_mode="approve"',
+      '-c', 'features.plugins=false',
       'exec',
     ]
     const mode = this.sessionId
@@ -69,6 +79,7 @@ export class CodexConversation {
     const childEnv = { ...process.env }
     delete childEnv.OPENAI_API_KEY
     delete childEnv.CODEX_API_KEY
+    childEnv.JARVIS_ROUTER_TOKEN = this.routerToken
     const child = spawn(invocation.command, invocation.args, {
       cwd: this.cwd,
       env: childEnv,

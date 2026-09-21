@@ -18,6 +18,7 @@
     "setup": "node scripts/setup.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "@mediapipe/tasks-vision": "^1.0.1",
     "@picovoice/porcupine-web": "^4.0.1",
     "@picovoice/web-voice-processor": "^4.0.10",
@@ -31,6 +32,7 @@
     "react-dom": "^19.2.8",
     "three": "^0.185.1",
     "ws": "^8.21.1",
+    "zod": "^4.4.3",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
