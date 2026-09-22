@@ -178,6 +178,9 @@ export default function App() {
             spk.say(forTool(name))
           }
         },
+        onAck: (text) => {
+          if (!stale() && !started && text) spk.say(text)
+        },
       })
 
       if (stale()) return

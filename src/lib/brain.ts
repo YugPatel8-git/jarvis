@@ -2,7 +2,7 @@ import * as bridge from './bridge'
 import type { Blade, Panel } from '../store'
 
 export type Msg = { role: 'user' | 'assistant'; content: string }
-export type AskHandlers = { onText: (delta: string) => void; onTool: (name: string) => void }
+export type AskHandlers = { onText: (delta: string) => void; onTool: (name: string) => void; onAck?: (text: string) => void }
 export type { ConnectionState } from './bridge'
 export const usingBridge = true
 export function ask(prompt: string, _history: Msg[], handlers: AskHandlers) { return bridge.ask(prompt, handlers) }

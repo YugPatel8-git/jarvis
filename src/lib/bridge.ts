@@ -37,6 +37,9 @@ type Frame = {
   seconds?: number
   when?: string
   servers?: Array<string | { name?: string }>
+  state?: string
+  metric?: string
+  ms?: number
 }
 
 /** Every question gets an id so its answer can be told from anyone else's. */
@@ -170,7 +173,7 @@ function dispatch(ws: WebSocket) {
       return
     }
 
-    if (msg.type === 'ready') {
+    if (msg.type === 'ready' || msg.type === 'core') {
       // Keep listening so a future bridge can refine its capability list.
       servers = (msg.servers ?? [])
         .map((s) => (typeof s === 'string' ? s : (s.name ?? '')))
@@ -449,6 +452,10 @@ export async function ask(
             if (!msg.name) break
             tools.push(msg.name)
             handlers.onTool(prettyToolName(msg.name))
+            break
+
+          case 'ack':
+            handlers.onAck?.(msg.text ?? '')
             break
 
           case 'done':

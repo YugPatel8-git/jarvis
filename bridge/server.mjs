@@ -2,7 +2,7 @@ import http from 'node:http'
 import { randomBytes } from 'node:crypto'
 import process from 'node:process'
 import { WebSocketServer, WebSocket } from 'ws'
-import { CodexConversation, codexModelLabel } from './codex.mjs'
+import { CodexAppServerConversation, appServerModelLabel } from './codex-app-server.mjs'
 import { createRouter } from './router.mjs'
 import { matchFastPath } from './fast-path.mjs'
 
@@ -19,7 +19,7 @@ async function handle(req,res){
   if(!originAllowed(origin)){res.writeHead(403,{vary:'origin'});return res.end('forbidden')}
   const h=cors(origin)
   if(req.method==='OPTIONS'){res.writeHead(204,h);return res.end()}
-  if(req.method==='GET'&&req.url==='/health'){res.writeHead(200,{...h,'content-type':'application/json'});return res.end(JSON.stringify({ok:true,backend:'codex',tools:true,tts:Boolean(eleven()),stt:Boolean(eleven())}))}
+  if(req.method==='GET'&&req.url==='/health'){res.writeHead(200,{...h,'content-type':'application/json'});return res.end(JSON.stringify({ok:true,backend:'codex-app-server',core:conversation.state,model:conversation.model||'Codex default',efforts:conversation.supportedEfforts,tools:true,tts:Boolean(eleven()),stt:Boolean(eleven()),prewarm:coreTimings}))}
   if(req.method==='POST'&&req.url==='/tts'){
     const key=eleven();if(!key){res.writeHead(503,h);return res.end('ElevenLabs is not configured.')}
     const data=JSON.parse((await body(req,64*1024)).toString());const text=String(data.text??'').slice(0,5000)
@@ -38,6 +38,10 @@ const wss=new WebSocketServer({noServer:true,maxPayload:2*1024*1024})
 let frontend=null, seq=0
 const waiting=new Map()
 function send(msg){if(frontend?.readyState===WebSocket.OPEN)frontend.send(JSON.stringify(msg))}
+let askId=null, ackTimer=null
+const coreTimings={}
+const conversation=new CodexAppServerConversation({cwd:process.cwd(),routerToken:TOKEN,onText:(delta)=>{if(ackTimer){clearTimeout(ackTimer);ackTimer=null}send({type:'text',delta,ask:askId})},onTool:(name)=>send({type:'tool',name,ask:askId}),onTiming:(metric,ms)=>{const value=Number(ms.toFixed(2));coreTimings[metric]=value;send({type:'timing',metric,ms:value,ask:askId})},onState:(state)=>send({type:'core',state,servers:[state==='ready'?'ai-core-ready':state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']})})
+void conversation.warm().catch((e)=>console.warn(`[jarvis] app-server prewarm failed; exec fallback remains available: ${e.message}`))
 function request(type,args,ms=120000){return new Promise((ok,no)=>{if(!frontend)return no(new Error('JARVIS interface is not connected.'));const id=`r${++seq}`,timer=setTimeout(()=>{waiting.delete(id);no(new Error(`${type} request timed out`))},ms);waiting.set(id,{ok,no,timer});send({type,id,...args})})}
 const route=createRouter({
   requestApproval:(p)=>request('approval',p).then(x=>Boolean(x.approved)),
@@ -55,16 +59,14 @@ wss.on('connection',(socket,req)=>{
     socket.on('message',async(raw)=>{let m;try{m=JSON.parse(raw)}catch{return}try{socket.send(JSON.stringify({id:m.id,result:await route(m.tool,m.args)}))}catch(e){socket.send(JSON.stringify({id:m.id,error:String(e?.message??e)}))}})
     return
   }
-  frontend=socket;socket.send(JSON.stringify({type:'ready',servers:['codex','jarvis-tools','hud','vision']}))
-  let askId=null
-  const conversation=new CodexConversation({cwd:process.cwd(),routerToken:TOKEN,onText:(delta)=>send({type:'text',delta,ask:askId}),onTool:(name)=>send({type:'tool',name,ask:askId})})
+  frontend=socket;socket.send(JSON.stringify({type:'ready',servers:[conversation.state==='ready'?'ai-core-ready':conversation.state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']}))
   socket.on('message',(raw)=>{
     let m;try{m=JSON.parse(raw)}catch{return}
     if((m.type==='reply'||m.type==='approval-reply')&&m.id){const p=waiting.get(m.id);if(p){clearTimeout(p.timer);waiting.delete(m.id);p.ok(m)}return}
     if(m.type==='interrupt'){conversation.cancel();return}
     if(m.type!=='ask'||typeof m.text!=='string')return
     if(Buffer.byteLength(m.text)>32*1024)return send({type:'error',ask:m.id??null,message:'The request is too large.'})
-    if(conversation.child)conversation.cancel();askId=typeof m.id==='string'?m.id:null
+    if(conversation.busy)conversation.cancel();askId=typeof m.id==='string'?m.id:null
     const fast=matchFastPath(m.text)
     if(fast){
       send({type:'route',engine:'local',ask:askId})
@@ -77,8 +79,13 @@ wss.on('connection',(socket,req)=>{
       return
     }
     send({type:'route',engine:'codex',ask:askId})
+    if(ackTimer)clearTimeout(ackTimer)
+    const ackAsk=askId;ackTimer=setTimeout(()=>{ackTimer=null;if(conversation.busy&&askId===ackAsk)send({type:'ack',text:'On it.',ask:ackAsk})},450)
     void conversation.ask(m.text).then(text=>send({type:'done',text,ask:askId})).catch(e=>send({type:'error',message:String(e?.message??e),ask:askId}))
   })
-  socket.on('close',()=>{if(frontend===socket)frontend=null;conversation.close();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
+  socket.on('close',()=>{if(frontend===socket)frontend=null;if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
 })
-server.listen(PORT,HOST,()=>{console.log(`[jarvis] bridge listening on ws://${HOST}:${PORT}`);console.log(`[jarvis] backend ${codexModelLabel()} with routed local MCP tools`);console.log(`[jarvis] speech ${eleven()?'ElevenLabs enabled server-side':'system/Kokoro fallback'}`)})
+server.listen(PORT,HOST,()=>{console.log(`[jarvis] bridge listening on ws://${HOST}:${PORT}`);console.log(`[jarvis] backend ${appServerModelLabel(conversation)} via persistent app-server with exec fallback`);console.log(`[jarvis] speech ${eleven()?'ElevenLabs enabled server-side':'system/Kokoro fallback'}`)})
+function shutdown(){conversation.close();server.close()}
+process.on('SIGINT',shutdown)
+process.on('SIGTERM',shutdown)

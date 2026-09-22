@@ -87,6 +87,10 @@ export const diag = {
   rescued: 0,
   voice: '',
   lastText: '',
+  /** Queue-to-audible-start latency for the most recent spoken chunk. */
+  lastStartLatencyMs: 0,
+  /** Lowest queue-to-start latency observed in this page session. */
+  bestStartLatencyMs: 0,
 }
 
 if (typeof window !== 'undefined') {
@@ -331,6 +335,7 @@ function shape(text: string): string {
 
 type Item = {
   text: string
+  queuedAt: number
   /** Generation starts one sentence ahead, not all at once. */
   audio?: Promise<string | null> | null
 }
@@ -359,7 +364,7 @@ export function createSpeaker(): Speaker {
     const text = shape(sentence)
     if (!text) return
 
-    const item: Item = { text }
+    const item: Item = { text, queuedAt: performance.now() }
     if (priority) {
       // Genuinely ahead of the queue this time. The old `say()` appended to the
       // same chain and only appeared to preempt because it was called when the
@@ -431,11 +436,11 @@ export function createSpeaker(): Speaker {
       if (cancelled) return
       // A failed generation is not a failed turn — drop to the system voice.
       if (url) {
-        await playUrl(url, item.text)
+        await playUrl(url, item.text, item.queuedAt)
         return
       }
 
-      const spoke = await speakNative(item.text)
+      const spoke = await speakNative(item.text, item.queuedAt)
       if (spoke || cancelled) return
 
       // The OS voice produced no sound. That is not recoverable by retrying it,
@@ -452,14 +457,14 @@ export function createSpeaker(): Speaker {
       const rescue = await fetchCloudAudio(item.text).catch(() => null)
       if (rescue && !cancelled) {
         diag.rescued++
-        await playUrl(rescue, item.text)
+        await playUrl(rescue, item.text, item.queuedAt)
       }
     } finally {
       if (speaking === item.text) setSpeaking('')
     }
   }
 
-  const speakNative = (text: string) =>
+  const speakNative = (text: string, queuedAt: number) =>
     new Promise<boolean>((resolve) => {
       // Chrome's speechSynthesis wedges after cancel().
       //
@@ -523,6 +528,8 @@ export function createSpeaker(): Speaker {
       u.onstart = () => {
         started = true
         diag.started++
+        diag.lastStartLatencyMs = Math.round(performance.now() - queuedAt)
+        if (!diag.bestStartLatencyMs || diag.lastStartLatencyMs < diag.bestStartLatencyMs) diag.bestStartLatencyMs = diag.lastStartLatencyMs
         diag.lastError = ''
         if (watchdog) clearTimeout(watchdog)
         // Chrome stops speaking after roughly fifteen seconds unless the engine
@@ -581,7 +588,7 @@ export function createSpeaker(): Speaker {
       speechSynthesis.speak(u)
     })
 
-  const playUrl = (url: string, text: string) =>
+  const playUrl = (url: string, text: string, queuedAt: number) =>
     new Promise<void>((resolve) => {
       const audio = new Audio(url)
       currentAudio = audio
@@ -635,6 +642,8 @@ export function createSpeaker(): Speaker {
       // verdict — and the T self-test — tell the truth on the premium path.
       audio.onplaying = () => {
         diag.started++
+        diag.lastStartLatencyMs = Math.round(performance.now() - queuedAt)
+        if (!diag.bestStartLatencyMs || diag.lastStartLatencyMs < diag.bestStartLatencyMs) diag.bestStartLatencyMs = diag.lastStartLatencyMs
         diag.lastError = ''
       }
       audio.onended = finish
