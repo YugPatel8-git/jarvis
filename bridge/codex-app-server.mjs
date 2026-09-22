@@ -32,6 +32,7 @@ function safeEnv(routerToken) {
   const env = { ...process.env, JARVIS_ROUTER_TOKEN: routerToken }
   delete env.OPENAI_API_KEY
   delete env.CODEX_API_KEY
+  delete env.FISH_AUDIO_API_KEY
   return env
 }
 

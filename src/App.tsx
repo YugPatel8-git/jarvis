@@ -403,7 +403,7 @@ export default function App() {
       s.setConnected(connectedLabels())
       s.setBridgeReady(isConnected())
     }).catch((err: Error) => s.setError(err.message))
-    void probeCapabilities()
+    void probeCapabilities().then(() => store.getState().setVoice(currentVoiceName()))
     s.setVoice(currentVoiceName())
     if (TTS_ENGINE === 'kokoro') {
       void kokoro.load()

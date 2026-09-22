@@ -28,7 +28,8 @@ async function shell(a){
   if(a.script!==undefined){command=process.env.SystemRoot+'\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';args=['-NoProfile','-NonInteractive','-Command',String(a.script)]}
   if(!command)throw new Error('A command or PowerShell script is required.')
   try{
-    const r=await runFile(command,args,{cwd:a.cwd?resolve(String(a.cwd)):process.cwd(),timeout,maxBuffer:MAX_OUTPUT*4,windowsHide:true,shell:false,env:{...process.env}})
+    const env={...process.env};delete env.FISH_AUDIO_API_KEY
+    const r=await runFile(command,args,{cwd:a.cwd?resolve(String(a.cwd)):process.cwd(),timeout,maxBuffer:MAX_OUTPUT*4,windowsHide:true,shell:false,env})
     return {stdout:clip(r.stdout),stderr:clip(r.stderr)}
   }catch(err){
     const detail=[clip(err?.stdout),clip(err?.stderr),String(err?.killed?'Command timed out or was terminated.':'')].filter(Boolean).join('\n')
@@ -51,6 +52,15 @@ async function filesystem(a){
 export function createRouter({requestApproval,emit,request}){
   let hudSeq = 0
   return async function route(tool,args={}){
+    // The bridge owns environment secrets. MCP tools must not return them to
+    // the model, even after a generic high-risk approval.
+    const envFile = /(?:^|[\\/])\.env(?:\.[^\\/]*)?$/i
+    const targetPaths = [args.path,args.destination].filter(Boolean).map(String)
+    const shellText = [args.command,...(Array.isArray(args.args)?args.args:[]),args.script].filter(Boolean).join(' ')
+    if ((tool==='filesystem'&&targetPaths.some(p=>envFile.test(p))) ||
+        (tool==='shell'&&/\.env(?:\.[\w-]+)?\b/i.test(shellText))) {
+      return {denied:true,message:'Environment files are reserved for the local bridge.'}
+    }
     const policy=classify(tool,args)
     let approved=policy.classification!=='high-risk'
     await audit({tool,classification:policy.classification,approvalRequested:!approved,status:approved?'started':'awaiting-approval',args:redact(args)})

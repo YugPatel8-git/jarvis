@@ -99,6 +99,7 @@ export class CodexConversation {
     const childEnv = { ...process.env }
     delete childEnv.OPENAI_API_KEY
     delete childEnv.CODEX_API_KEY
+    delete childEnv.FISH_AUDIO_API_KEY
     childEnv.JARVIS_ROUTER_TOKEN = this.routerToken
     const child = spawn(invocation.command, invocation.args, {
       cwd: this.cwd,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { matchFastPath } from '../bridge/fast-path.mjs'
 import { isComplex } from '../bridge/codex-app-server.mjs'
 import { classify, HIGH_RISK, NORMAL, redact, sensitivePath } from '../bridge/security.mjs'
+import { createRouter } from '../bridge/router.mjs'
 
 test('requested deterministic commands route without a model turn', () => {
   const commands = [
@@ -28,10 +29,18 @@ test('sensitive and destructive operations still require approval', () => {
   assert.equal(classify('browser', { operation: 'click', selector: '#purchase' }).classification, HIGH_RISK)
   assert.equal(classify('filesystem', { operation: 'stat', path: 'C:\\work\\file.txt' }).classification, NORMAL)
   assert.equal(sensitivePath('C:\\Users\\x\\.ssh\\id_ed25519'), true)
+  assert.equal(sensitivePath('C:\\work\\jarvis\\.env'), true)
+  assert.equal(classify('shell', { command: 'powershell', script: 'Get-Content .env' }).classification, HIGH_RISK)
 })
 
 test('audit redaction removes common secrets', () => {
   assert.deepEqual(redact({ apiKey: 'secret-value', detail: 'Bearer abcdefghijklmnopqrstuvwxyz' }), {
     apiKey: '[REDACTED]', detail: '[REDACTED]',
   })
+})
+
+test('MCP tools cannot read the bridge environment file', async () => {
+  const route = createRouter({ requestApproval: async () => true, emit: () => {}, request: async () => ({}) })
+  assert.equal((await route('filesystem', { operation: 'read', path: '.env' })).denied, true)
+  assert.equal((await route('shell', { command: 'powershell', script: 'Get-Content .env' })).denied, true)
 })

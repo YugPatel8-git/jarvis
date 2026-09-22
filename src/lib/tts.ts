@@ -1,14 +1,14 @@
-import { TTS_ENGINE } from '../config'
+import { BRIDGE_HTTP_URL, TTS_ENGINE } from '../config'
 import * as kokoro from './kokoro'
+import { caps } from './capabilities'
 import { takeSpeechPhrases } from './speech-phrases'
 import { toSpeechText, type SpeechContext } from './speech-text'
 
 /**
  * Speech output.
  *
- * Kokoro generates speech locally and the browser's speechSynthesis remains
- * the quick fallback if the model is unavailable. No speech text is sent to a
- * remote voice service.
+ * Fish Audio is reached only through the local bridge when configured.
+ * Kokoro and browser speechSynthesis remain the local fallbacks.
  *
  * Text is cut at stable clauses and sentences as it streams in, so JARVIS can
  * start talking while Codex is still writing.
@@ -55,7 +55,7 @@ const ECHO_TAIL_MS = 1800
  * indistinguishable. This tells them apart at a glance.
  */
 export const diag = {
-  engine: 'system' as 'system' | 'kokoro',
+  engine: 'system' as 'system' | 'kokoro' | 'fish',
   /** Utterances handed to an engine — the OS voice or an audio element. */
   spoken: 0,
   /**
@@ -212,6 +212,7 @@ function pickVoice(): SpeechSynthesisVoice | null {
  *  always naming a speechSynthesis voice that a cloud or neural engine has
  *  quietly replaced. */
 export function currentVoiceName(): string {
+  if (caps().ttsEngine === 'fish') return 'Fish Audio'
   if (TTS_ENGINE === 'kokoro' && kokoro.isReady()) {
     return kokoro.activeVoice().replace(/^bm_/, '')
   }
@@ -310,12 +311,14 @@ type Item = {
   text: string
   queuedAt: number
   model: boolean
+  engine?: 'fish' | 'kokoro' | 'system'
   /** Generation starts at most one phrase ahead, while playback is active. */
   audio?: Promise<string | null> | null
 }
 
 export function createSpeaker(context: SpeechContext = {}): Speaker {
   const turnStart = performance.now()
+  const useFish = caps().ttsEngine === 'fish'
   // Keep one timbre per answer; a model finishing its first download midway
   // through a sentence should only take over on the following turn.
   const useKokoro = TTS_ENGINE === 'kokoro' && kokoro.isReady()
@@ -335,6 +338,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   let playingAudio = false
 
   let currentAudio: HTMLAudioElement | null = null
+  const requests = new Set<AbortController>()
   let nativeInFlight = false
   let drained: Array<() => void> = []
 
@@ -373,11 +377,36 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   function synthesise(item: Item): Promise<string | null> | null {
     const { text } = item
     if (item.model) mark('firstTtsStartMs')
+    if (useFish) {
+      const controller = new AbortController()
+      requests.add(controller)
+      item.engine = 'fish'
+      return fetch(`${BRIDGE_HTTP_URL}/tts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+        signal: controller.signal,
+      }).then(async (res) => {
+        if (!res.ok) return null
+        const blob = await res.blob()
+        if (cancelled) return null
+        if (item.model) mark('firstAudioReadyMs')
+        return URL.createObjectURL(blob)
+      }).catch(() => null).finally(() => requests.delete(controller))
+        .then(async (url) => {
+          if (url) return url
+          if (cancelled || kokoro.isUnavailable()) return null
+          item.engine = 'kokoro'
+          const local = await kokoro.speak(text).catch(() => null)
+          if (local && item.model) mark('firstAudioReadyMs')
+          return local
+        })
+    }
     if (useKokoro && !kokoro.isUnavailable()) {
-      diag.engine = 'kokoro'
+      item.engine = 'kokoro'
       return kokoro.speak(text).then((url) => { if (url && item.model) mark('firstAudioReadyMs'); return url }).catch(() => null)
     }
-    diag.engine = 'system'
+    item.engine = 'system'
     return null
   }
 
@@ -420,12 +449,14 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       if (url) {
         playingAudio = true
         prime(queue[0])
+        diag.engine = item.engine === 'fish' ? 'fish' : 'kokoro'
         await playUrl(url, item.text, item.queuedAt, item.model)
         return
       }
 
       playingAudio = true
       prime(queue[0])
+      diag.engine = 'system'
       await speakNative(item.text, item.queuedAt, item.model)
     } finally {
       playingAudio = false
@@ -568,7 +599,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       // Count playback only when the element actually starts.
       diag.spoken++
       diag.lastText = text.slice(0, 60)
-      diag.voice = kokoro.activeVoice()
+      diag.voice = diag.engine === 'fish' ? 'Fish Audio' : kokoro.activeVoice()
 
       let read: (() => number) | null = null
       const ctx = outputContext()
@@ -666,6 +697,8 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (item.audio) void item.audio.then((url) => { if (url) URL.revokeObjectURL(url) })
       }
       queue.length = 0
+      for (const request of requests) request.abort()
+      requests.clear()
       // Keep the echo tail: the words already in the air still have to be
       // recognised and discarded, even though he has stopped adding to them.
       setSpeaking('')

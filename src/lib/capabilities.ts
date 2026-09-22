@@ -6,26 +6,23 @@ import { BACKEND, BRIDGE_HTTP_URL, env } from '../config'
  * The whole point is that the app runs for anyone. A student who has done
  * nothing but install Codex CLI and log in gets the browser's own speech
  * recognition and voice — no keys, no accounts, it just works. A student who
- * also supplies an ElevenLabs key to the bridge environment gets Scribe
- * transcription and the ElevenLabs voice instead, automatically, with no flag to
- * set. This module is how the rest of the app learns which of those two worlds
- * it is in, so voice.ts and tts.ts never have to guess.
+ * also supplies an ElevenLabs key gets Scribe transcription. Fish Audio TTS
+ * is detected separately through the local bridge, with local voice fallback.
  *
- * The premium paths both live behind the bridge — it holds the key and makes
- * the calls, so the browser never sees a secret. In direct mode (no bridge)
- * only a key baked into the bundle could reach ElevenLabs for speech, and that
- * is not a path worth encouraging, so direct mode is treated as browser-only.
+ * Remote speech paths live behind the bridge, which holds their keys. Direct
+ * mode is browser-only so no credentials enter the frontend bundle.
  */
 
 export type Capabilities = {
   /** ElevenLabs speech-to-text (Scribe) is reachable via the bridge. */
   stt: boolean
-  /** ElevenLabs text-to-speech is reachable via the bridge. */
+  /** Fish Audio text-to-speech is reachable via the bridge. */
   tts: boolean
+  ttsEngine: 'fish' | null
 }
 
 /** Browser-only until the probe says otherwise. Safe default: the app works. */
-let current: Capabilities = { stt: false, tts: false }
+let current: Capabilities = { stt: false, tts: false, ttsEngine: null }
 let probed = false
 
 /** The last known capabilities. Read synchronously by the voice and speech
@@ -47,7 +44,7 @@ export function capabilitiesProbed(): boolean {
 export async function probeCapabilities(): Promise<Capabilities> {
   if (BACKEND !== 'bridge') {
     // No bridge to ask. Direct mode has no server-side speech, so browser only.
-    current = { stt: false, tts: false }
+    current = { stt: false, tts: false, ttsEngine: null }
     probed = true
     return current
   }
@@ -56,8 +53,8 @@ export async function probeCapabilities(): Promise<Capabilities> {
       signal: AbortSignal.timeout(3000),
     })
     if (res.ok) {
-      const h = (await res.json()) as { stt?: boolean; tts?: boolean }
-      current = { stt: Boolean(h.stt), tts: Boolean(h.tts) }
+      const h = (await res.json()) as { stt?: boolean; tts?: boolean; ttsEngine?: string }
+      current = { stt: Boolean(h.stt), tts: Boolean(h.tts), ttsEngine: h.ttsEngine === 'fish' ? 'fish' : null }
     }
   } catch {
     // Bridge down or slow — stay on the browser engines rather than blocking
@@ -70,8 +67,8 @@ export async function probeCapabilities(): Promise<Capabilities> {
 /** A short human label for the HUD: what voice stack is actually in play. */
 export function engineLabel(): string {
   const c = current
-  if (c.stt && c.tts) return 'ElevenLabs'
-  if (c.tts) return 'ElevenLabs voice'
+  if (c.stt && c.ttsEngine === 'fish') return 'ElevenLabs recognition + Fish Audio voice'
+  if (c.ttsEngine === 'fish') return 'Fish Audio voice'
   // env.elevenKey is only meaningful in direct mode; harmless to mention.
   if (env.elevenKey && BACKEND !== 'bridge') return 'ElevenLabs (direct)'
   return 'browser speech'

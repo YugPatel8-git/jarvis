@@ -1,10 +1,26 @@
 import http from 'node:http'
 import { randomBytes } from 'node:crypto'
 import process from 'node:process'
+import { existsSync, readFileSync } from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import { CodexAppServerConversation, appServerModelLabel } from './codex-app-server.mjs'
 import { createRouter } from './router.mjs'
 import { matchFastPath } from './fast-path.mjs'
+import { FISH_MODEL, fishConfigured, fishSpeech } from './fish-tts.mjs'
+
+// Read only Fish settings into a private object. Never add the key to
+// process.env: Codex, MCP, and shell child processes inherit that environment.
+const fishEnv = {
+  FISH_AUDIO_API_KEY: process.env.FISH_AUDIO_API_KEY ?? '',
+  FISH_AUDIO_REFERENCE_ID: process.env.FISH_AUDIO_REFERENCE_ID ?? '',
+}
+if (existsSync('.env')) {
+  const lines = readFileSync('.env', 'utf8').split(/\r?\n/)
+  for (const line of lines) {
+    const match = line.match(/^\s*(FISH_AUDIO_API_KEY|FISH_AUDIO_REFERENCE_ID)=(.*)\s*$/)
+    if (match && !fishEnv[match[1]]) fishEnv[match[1]] = match[2].trim().replace(/^(['"])(.*)\1$/, '$2')
+  }
+}
 
 const HOST='127.0.0.1', PORT=Number(process.env.JARVIS_BRIDGE_PORT??8787)
 const TOKEN=randomBytes(32).toString('hex')
@@ -19,12 +35,16 @@ async function handle(req,res){
   if(!originAllowed(origin)){res.writeHead(403,{vary:'origin'});return res.end('forbidden')}
   const h=cors(origin)
   if(req.method==='OPTIONS'){res.writeHead(204,h);return res.end()}
-  if(req.method==='GET'&&req.url==='/health'){res.writeHead(200,{...h,'content-type':'application/json'});return res.end(JSON.stringify({ok:true,backend:'codex-app-server',core:conversation.state,model:conversation.model||'Codex default',efforts:conversation.supportedEfforts,tools:true,tts:Boolean(eleven()),stt:Boolean(eleven()),prewarm:coreTimings}))}
+  if(req.method==='GET'&&req.url==='/health'){res.writeHead(200,{...h,'content-type':'application/json'});return res.end(JSON.stringify({ok:true,backend:'codex-app-server',core:conversation.state,model:conversation.model||'Codex default',efforts:conversation.supportedEfforts,tools:true,tts:fishConfigured(fishEnv),ttsEngine:fishConfigured(fishEnv)?'fish':null,stt:Boolean(eleven()),prewarm:coreTimings}))}
   if(req.method==='POST'&&req.url==='/tts'){
-    const key=eleven();if(!key){res.writeHead(503,h);return res.end('ElevenLabs is not configured.')}
-    const data=JSON.parse((await body(req,64*1024)).toString());const text=String(data.text??'').slice(0,5000)
-    const up=await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${process.env.JARVIS_VOICE_ID??'JBFqnCBsd6RMkjVDRZzb'}/stream?output_format=mp3_22050_32&optimize_streaming_latency=3`,{method:'POST',headers:{'xi-api-key':key,'content-type':'application/json'},body:JSON.stringify({text,model_id:'eleven_flash_v2_5'})})
-    res.writeHead(up.status,{...h,'content-type':up.headers.get('content-type')??'audio/mpeg','cache-control':'no-store'});for await(const c of up.body)res.write(c);return res.end()
+    if(!fishConfigured(fishEnv)){res.writeHead(503,{...h,'cache-control':'no-store'});return res.end('Speech service unavailable.')}
+    const data=JSON.parse((await body(req,64*1024)).toString());const text=String(data.text??'').trim().slice(0,5000)
+    if(!text){res.writeHead(400,h);return res.end('Speech text required.')}
+    const up=await fishSpeech(text,{env:fishEnv,signal:AbortSignal.timeout(20000)})
+    if(!up?.audio){res.writeHead(502,{...h,'cache-control':'no-store'});return res.end('Speech generation unavailable.')}
+    res.writeHead(200,{...h,'content-type':'audio/mpeg','cache-control':'no-store'})
+    try{for await(const c of up.audio)res.write(c)}catch{res.destroy();return}
+    return res.end()
   }
   if(req.method==='POST'&&req.url==='/stt'){
     const key=eleven();if(!key){res.writeHead(503,h);return res.end('ElevenLabs is not configured.')}
@@ -33,7 +53,7 @@ async function handle(req,res){
   }
   res.writeHead(404,h);res.end()
 }
-const server=http.createServer((q,s)=>handle(q,s).catch(e=>{if(!s.headersSent)s.writeHead(500);s.end(String(e?.message??e))}))
+const server=http.createServer((q,s)=>handle(q,s).catch(e=>{if(!s.headersSent)s.writeHead(500,{'cache-control':'no-store'});s.end(q.url==='/tts'?'Speech generation unavailable.':String(e?.message??e))}))
 const wss=new WebSocketServer({noServer:true,maxPayload:2*1024*1024})
 let frontend=null, seq=0
 const waiting=new Map()
@@ -83,7 +103,7 @@ wss.on('connection',(socket,req)=>{
   })
   socket.on('close',()=>{if(frontend===socket)frontend=null;if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
 })
-server.listen(PORT,HOST,()=>{console.log(`[jarvis] bridge listening on ws://${HOST}:${PORT}`);console.log(`[jarvis] backend ${appServerModelLabel(conversation)} via persistent app-server with exec fallback`);console.log(`[jarvis] speech ${eleven()?'ElevenLabs enabled server-side':'system/Kokoro fallback'}`)})
+server.listen(PORT,HOST,()=>{console.log(`[jarvis] bridge listening on ws://${HOST}:${PORT}`);console.log(`[jarvis] backend ${appServerModelLabel(conversation)} via persistent app-server with exec fallback`);console.log(`[jarvis] speech ${fishConfigured(fishEnv)?`Fish Audio ${FISH_MODEL} with local fallback`:'local Kokoro/system'}`)})
 function shutdown(){conversation.close();server.close()}
 process.on('SIGINT',shutdown)
 process.on('SIGTERM',shutdown)
