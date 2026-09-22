@@ -8,7 +8,8 @@ import {
 } from '../config'
 import * as kokoro from './kokoro'
 import { caps } from './capabilities'
-import { speakablePhrase, takeSpeechPhrases } from './speech-phrases'
+import { takeSpeechPhrases } from './speech-phrases'
+import { toSpeechText, type SpeechContext } from './speech-text'
 
 /**
  * Speech output.
@@ -335,7 +336,7 @@ type Item = {
   audio?: Promise<string | null> | null
 }
 
-export function createSpeaker(): Speaker {
+export function createSpeaker(context: SpeechContext = {}): Speaker {
   const turnStart = performance.now()
   diag.firstModelDeltaMs = 0
   diag.firstPhraseMs = 0
@@ -364,10 +365,11 @@ export function createSpeaker(): Speaker {
 
   const enqueue = (sentence: string, priority = false) => {
     if (cancelled) return
-    if (!speakablePhrase(sentence)) return
+    const spoken = toSpeechText(sentence, context)
+    if (!spoken) return
     // Shape once here so both engines get the same text — stripped markdown,
     // and the comma before "sir" that buys the beat.
-    const text = shape(sentence)
+    const text = context.literalTechnical ? spoken : shape(spoken)
     if (!text) return
 
     const item: Item = { text, queuedAt: performance.now(), model: !priority }
@@ -696,6 +698,7 @@ export function createSpeaker(): Speaker {
     push(delta) {
       if (cancelled) return
       buffer += delta
+      if (context.literalTechnical) return
       const extracted = takeSpeechPhrases(buffer)
       buffer = extracted.rest
       for (const phrase of extracted.phrases) enqueue(phrase)

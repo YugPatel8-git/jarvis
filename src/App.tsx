@@ -7,6 +7,7 @@ import { Diagnostics } from './ui/Diagnostics'
 import { useStore } from './store'
 import { startVoice, type Voice, type VoiceMode } from './lib/voice'
 import { createSpeaker, cycleVoice, currentVoiceName, prewarmSpeech } from './lib/tts'
+import { wantsLiteralTechnicalSpeech } from './lib/speech-text'
 import * as sfx from './lib/sfx'
 import * as music from './lib/music'
 import * as hands from './lib/hands'
@@ -135,7 +136,7 @@ export default function App() {
     s.pushTurn({ id: newId(), role: 'user', text: said })
     s.setPhase('thinking')
 
-    const spk = createSpeaker()
+    const spk = createSpeaker({ literalTechnical: wantsLiteralTechnicalSpeech(said) })
     speaker.current = spk
     sfx.duck(true)
     music.duck(true)

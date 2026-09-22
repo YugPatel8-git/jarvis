@@ -5,7 +5,7 @@ import ts from 'typescript'
 
 const source = readFileSync(new URL('../src/lib/speech-phrases.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText
-const { speakablePhrase, takeSpeechPhrases } = await import(`data:text/javascript,${encodeURIComponent(compiled)}`)
+const { takeSpeechPhrases } = await import(`data:text/javascript,${encodeURIComponent(compiled)}`)
 
 test('releases a stable clause while the next clause is still streaming', () => {
   const first = takeSpeechPhrases('I checked the forecast for your area, and the rain should')
@@ -20,15 +20,9 @@ test('keeps short comma fragments and partial words together', () => {
   assert.deepEqual(second.phrases, ['Yes, the system is working as expected. '])
 })
 
-test('does not read URLs, paths, code, JSON, or unfinished markdown', () => {
-  for (const text of [
-    'See https://example.com/path, ',
-    'Open C:\\Users\\name\\file.txt. ',
-    'Edit src/lib/tts.ts next. ',
-    'Run `npm start` now. ',
-    '{"status":"ok"}',
-    'Read [this link](https://example.com). ',
-  ]) assert.equal(speakablePhrase(text), false, text)
+test('passes technical text through for the speech normalizer', () => {
+  const display = 'See https://example.com/path. More detail'
+  assert.deepEqual(takeSpeechPhrases(display).phrases, ['See https://example.com/path. '])
 })
 
 test('does not split an abbreviation as a sentence', () => {
