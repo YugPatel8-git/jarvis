@@ -4,6 +4,7 @@ import process from 'node:process'
 import { WebSocketServer, WebSocket } from 'ws'
 import { CodexConversation, codexModelLabel } from './codex.mjs'
 import { createRouter } from './router.mjs'
+import { matchFastPath } from './fast-path.mjs'
 
 const HOST='127.0.0.1', PORT=Number(process.env.JARVIS_BRIDGE_PORT??8787)
 const TOKEN=randomBytes(32).toString('hex')
@@ -64,6 +65,18 @@ wss.on('connection',(socket,req)=>{
     if(m.type!=='ask'||typeof m.text!=='string')return
     if(Buffer.byteLength(m.text)>32*1024)return send({type:'error',ask:m.id??null,message:'The request is too large.'})
     if(conversation.child)conversation.cancel();askId=typeof m.id==='string'?m.id:null
+    const fast=matchFastPath(m.text)
+    if(fast){
+      send({type:'route',engine:'local',ask:askId})
+      send({type:'tool',name:`local ${fast.tool}`,ask:askId})
+      void route(fast.tool,fast.args).then(value=>{
+        const spoken=value?.denied?value.message:fast.spoken
+        if(spoken)send({type:'text',delta:spoken,ask:askId})
+        send({type:'done',text:spoken||'',ask:askId,local:true})
+      }).catch(e=>send({type:'error',message:String(e?.message??e),ask:askId,local:true}))
+      return
+    }
+    send({type:'route',engine:'codex',ask:askId})
     void conversation.ask(m.text).then(text=>send({type:'done',text,ask:askId})).catch(e=>send({type:'error',message:String(e?.message??e),ask:askId}))
   })
   socket.on('close',()=>{if(frontend===socket)frontend=null;conversation.close();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
