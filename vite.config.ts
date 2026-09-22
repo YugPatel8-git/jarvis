@@ -9,6 +9,15 @@ export default defineConfig({
     // only accepts sockets from localhost:5173-5199, so stay inside that range
     // or set JARVIS_ALLOWED_ORIGINS to match.
     port: Number(process.env.PORT) || 5173,
+    watch: {
+      ignored: ['**/.jarvis/**'],
+    },
+    fs: {
+      // The isolated automation profile is runtime state and may eventually
+      // contain site data. Never let Vite serve it through /@fs or a direct
+      // project-relative request.
+      deny: ['.env', '.env.*', '*.{crt,pem}', '**/.jarvis/**'],
+    },
   },
   optimizeDeps: {
     // kokoro-js pulls in `phonemizer`, which carries espeak-ng as inline WASM.

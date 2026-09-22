@@ -21,7 +21,7 @@ tool('shell','Run a normal local executable with structured arguments, or a Powe
 tool('filesystem','Read/list/stat or create/write/move/delete ordinary files. Credential locations and destructive operations are approval-gated.',{
   operation:z.enum(['read','list','stat','mkdir','write','move','delete']),path:z.string(),destination:z.string().optional(),content:z.string().optional(),overwrite:z.boolean().optional(),recursive:z.boolean().optional(),
 })
-tool('hud','Show a sanitized JARVIS panel/blade, or change the HUD through its existing constrained operations.',{
+tool('hud','Show a sanitized JARVIS panel or blade, or change the HUD through constrained operations. For panel/blade value, supply title and html; optional kind, size, slot, accent, animation, and hold are normalized by the router.',{
   kind:z.enum(['panel','blade','ui']),operation:z.string().optional(),value:z.record(z.string(),z.unknown()),
 })
 tool('vision','Capture one requested camera frame or a short frame grid. Never use speculatively; browser camera permission still applies.',{

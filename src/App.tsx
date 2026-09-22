@@ -30,7 +30,6 @@ import {
 } from './lib/brain'
 import { startAnalyser, micLevel } from './lib/audio'
 import { probeCapabilities } from './lib/capabilities'
-import { env } from './config'
 
 /**
  * The conversation.
@@ -146,7 +145,7 @@ export default function App() {
     let filled = false
 
     try {
-      const { text } = await ask(said, history.current, {
+      await ask(said, history.current, {
         onText: (delta) => {
           if (stale()) return
           if (!started) {

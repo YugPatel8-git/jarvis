@@ -7,6 +7,7 @@ import { WebSocket } from 'ws'
 const PORT = Number(process.env.JARVIS_CHROME_PORT ?? 9223)
 const profile = resolve('.jarvis','chrome-profile')
 const candidates = [process.env.JARVIS_CHROME_PATH, process.env.ProgramFiles && resolve(process.env.ProgramFiles,'Google/Chrome/Application/chrome.exe'), process.env['ProgramFiles(x86)'] && resolve(process.env['ProgramFiles(x86)'],'Google/Chrome/Application/chrome.exe'), process.env.LOCALAPPDATA && resolve(process.env.LOCALAPPDATA,'Google/Chrome/Application/chrome.exe')].filter(Boolean)
+let cdpSeq = 0
 const wait = (ms) => new Promise((r) => setTimeout(r,ms))
 async function api(path='/json') {
   const r = await fetch(`http://127.0.0.1:${PORT}${path}`, { signal:AbortSignal.timeout(2500) })
@@ -24,10 +25,12 @@ async function ensure(url='about:blank') {
 async function tabs(){ await ensure(); return (await api('/json')).filter((t)=>t.type==='page') }
 async function cdp(target,method,params={}) {
   return new Promise((ok,no)=>{
-    const ws=new WebSocket(target.webSocketDebuggerUrl), id=Date.now()
+    // CDP request ids are protocol integers. Epoch milliseconds exceed the
+    // 32-bit range accepted by current Chrome builds and receive no response.
+    const ws=new WebSocket(target.webSocketDebuggerUrl), id=++cdpSeq
     const timer=setTimeout(()=>{ws.close();no(new Error('Chrome operation timed out'))},10000)
     ws.on('open',()=>ws.send(JSON.stringify({id,method,params})))
-    ws.on('message',(raw)=>{const m=JSON.parse(raw);if(m.id!==id)return;clearTimeout(timer);ws.close();m.error?no(new Error(m.error.message)):ok(m.result)})
+    ws.on('message',(raw)=>{const m=JSON.parse(raw);if(m.id!==id)return;clearTimeout(timer);ws.close();if(m.error)no(new Error(m.error.message));else ok(m.result)})
     ws.on('error',no)
   })
 }

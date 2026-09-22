@@ -157,7 +157,17 @@ export class CodexConversation {
     // unwinding, so the next utterance starts a fresh session.
     this.sessionId = null
     child.stdin.destroy()
-    child.kill('SIGTERM')
+    if (process.platform === 'win32' && child.pid) {
+      // codex.cmd runs beneath cmd.exe on Windows. Killing only the wrapper
+      // leaves codex.exe generating in the background, so terminate this one
+      // process tree by its concrete PID. No shell or model-supplied input is
+      // involved.
+      spawn(process.env.SystemRoot + '\\System32\\taskkill.exe', [
+        '/pid', String(child.pid), '/t', '/f',
+      ], { windowsHide: true, stdio: 'ignore', shell: false })
+    } else {
+      child.kill('SIGTERM')
+    }
   }
 
   close() {

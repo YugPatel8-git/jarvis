@@ -31,6 +31,7 @@ async function filesystem(a){
 }
 
 export function createRouter({requestApproval,emit,request}){
+  let hudSeq = 0
   return async function route(tool,args={}){
     const policy=classify(tool,args)
     let approved=policy.classification!=='high-risk'
@@ -45,7 +46,13 @@ export function createRouter({requestApproval,emit,request}){
       if(tool==='shell')result=await shell(args)
       else if(tool==='filesystem')result=await filesystem(args)
       else if(tool==='browser')result=await browserAction(args)
-      else if(tool==='hud'){emit(args.kind==='panel'?'panel':args.kind==='blade'?'blade':'ui',args.kind==='ui'?{op:args.operation,args:args.value??{}}:{[args.kind]:args.value});result={displayed:true}}
+      else if(tool==='hud'){
+        const value=args.value??{}, id=String(value.id??`hud-${Date.now().toString(36)}-${++hudSeq}`)
+        if(args.kind==='panel')emit('panel',{panel:{id,title:String(value.title??'JARVIS'),html:String(value.html??value.markup??''),anim:value.anim??'materialise',slot:value.slot??'right',accent:value.accent??'default',hold:value.hold??'turn'}})
+        else if(args.kind==='blade')emit('blade',{blade:{id,title:String(value.title??'JARVIS'),kind:value.kind??'markup',url:value.url,images:value.images,html:String(value.html??value.markup??''),mode:value.mode,size:value.size??'compact',hold:value.hold??'turn'}})
+        else emit('ui',{op:args.operation,args:value})
+        result={displayed:true,id}
+      }
       else if(tool==='vision')result=await request('capture',{mode:args.mode??'look',reason:String(args.reason??'').slice(0,80),seconds:Math.max(2,Math.min(15,Number(args.seconds)||6)),when:args.when==='past'?'past':'now'},45000)
       else if(tool==='mcp')throw new Error('External MCP adapters are disabled until an explicitly allowlisted adapter can route every action through this permission layer.')
       else throw new Error(`Unknown tool: ${tool}`)
