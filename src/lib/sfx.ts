@@ -6,19 +6,15 @@
  * licence to worry about, a few hundred bytes instead of a few megabytes.
  *
  * To use real recordings instead, drop matching files into `public/audio/`
- * (boot.mp3, wake.mp3, listen.mp3, tool.mp3, done.mp3, error.mp3) and they take
- * over automatically. Pixabay's sci-fi UI and HUD packs are the usual source —
- * CC0, no attribution, safe on a monetised channel. `ambient.mp3` is not one of
- * these: the looping bed is music.ts's, and the oscillator pair at the bottom of
- * this file is only the fallback for when that file isn't there.
+ * (listen.mp3, tool.mp3, done.mp3, error.mp3) and they take
+ * over automatically. These are interface cues; startup plays no soundtrack.
  */
 
-type Cue = 'boot' | 'wake' | 'listen' | 'tool' | 'done' | 'error'
+type Cue = 'listen' | 'tool' | 'done' | 'error'
 
 let ctx: AudioContext | null = null
 let master: GainNode | null = null
 const samples = new Map<Cue, AudioBuffer>()
-let ambient: { source: AudioBufferSourceNode; gain: GainNode } | null = null
 
 /** Where the master sits when JARVIS isn't speaking. */
 let volume = 0.5
@@ -63,15 +59,7 @@ export async function unlockAudio(): Promise<void> {
     try {
       await c.resume()
     } catch {
-      /**
-       * Swallowed on purpose, now that a clap can start the assistant.
-       *
-       * resume() rejects when there has been no user gesture, and a clap is not
-       * one — the browser has no idea a microphone heard anything. Letting that
-       * reject would abort the whole power-up over a sound that may well play
-       * fine anyway (any earlier interaction with the page unlocks it). Boot
-       * either way: the worst case is a silent start, not a dead one.
-       */
+      // A refused audio unlock should not prevent manual microphone capture.
     }
   }
   void loadOverrides()
@@ -79,7 +67,7 @@ export async function unlockAudio(): Promise<void> {
 
 /** Pick up any real audio files the user has dropped into public/audio/. */
 async function loadOverrides() {
-  const cues: Cue[] = ['boot', 'wake', 'listen', 'tool', 'done', 'error']
+  const cues: Cue[] = ['listen', 'tool', 'done', 'error']
   await Promise.all(
     cues.map(async (cue) => {
       if (samples.has(cue)) return
@@ -164,22 +152,6 @@ function noise({ at = 0, dur = 0.4, gain = 0.12, from = 400, to = 6000 } = {}) {
 // ---------------------------------------------------------------------------
 
 const synth: Record<Cue, () => void> = {
-  /** Reactor spin-up: a rising sweep under stacked fifths. */
-  boot: () => {
-    noise({ dur: 2.2, gain: 0.1, from: 120, to: 5200 })
-    blip(110, { dur: 2.4, type: 'sawtooth', gain: 0.1, sweepTo: 880 })
-    blip(220, { at: 0.1, dur: 2.2, type: 'sine', gain: 0.09, sweepTo: 1320 })
-    // The "online" confirmation — a clean rising third.
-    blip(880, { at: 1.9, dur: 0.3, gain: 0.18 })
-    blip(1320, { at: 2.05, dur: 0.45, gain: 0.2 })
-  },
-
-  /** Wake: two quick ascending pips. Deliberately short. */
-  wake: () => {
-    blip(1046, { dur: 0.09, gain: 0.22 })
-    blip(1568, { at: 0.07, dur: 0.14, gain: 0.2 })
-  },
-
   /** Listening: a single soft low pip so it doesn't fight the user's voice. */
   listen: () => blip(660, { dur: 0.1, gain: 0.14 }),
 
@@ -189,7 +161,7 @@ const synth: Record<Cue, () => void> = {
     noise({ dur: 0.1, gain: 0.05, from: 3000, to: 900 })
   },
 
-  /** Turn complete: a descending pair, the inverse of wake. */
+  /** Turn complete: a short descending pair. */
   done: () => {
     blip(1320, { dur: 0.1, gain: 0.14 })
     blip(880, { at: 0.08, dur: 0.2, gain: 0.13 })
@@ -217,78 +189,11 @@ export function play(cue: Cue) {
 }
 
 // ---------------------------------------------------------------------------
-// Ambient bed
-// ---------------------------------------------------------------------------
-
-/** Resting level of the synthesised bed. */
-const BED = 0.05
-
-/**
- * A quiet room tone under everything. Two detuned low oscillators through a
- * lowpass — barely audible on its own, but its absence is obvious. Keeps the
- * interface feeling powered rather than paused.
- *
- * Only a fallback: when public/audio/ambient.mp3 is present music.ts owns this
- * layer, which is why nothing calls this today.
- */
-export function startAmbient() {
-  if (ambient || !ctx || ctx.state !== 'running') return
-  const c = ctx
-
-  const gain = c.createGain()
-  gain.gain.value = 0
-  gain.connect(master!)
-
-  const frames = c.sampleRate * 4
-  const buf = c.createBuffer(1, frames, c.sampleRate)
-  const data = buf.getChannelData(0)
-  for (let i = 0; i < frames; i++) {
-    const t = i / c.sampleRate
-    data[i] =
-      (Math.sin(2 * Math.PI * 55 * t) * 0.5 +
-        Math.sin(2 * Math.PI * 55.6 * t) * 0.5 + // slight detune = slow beating
-        (Math.random() * 2 - 1) * 0.06) *
-      0.5
-  }
-
-  const source = c.createBufferSource()
-  source.buffer = buf
-  source.loop = true
-
-  const lp = c.createBiquadFilter()
-  lp.type = 'lowpass'
-  lp.frequency.value = 260
-
-  source.connect(lp).connect(gain)
-  source.start()
-  ambient = { source, gain }
-  rampTo(gain.gain, BED, 3)
-}
-
-export function stopAmbient() {
-  if (!ambient || !ctx) return
-  const { source, gain } = ambient
-  ambient = null
-  rampTo(gain.gain, 0, 0.6)
-  // Stop the node itself once it's inaudible, or it keeps a buffer looping in
-  // the graph for as long as the page is open.
-  setTimeout(() => {
-    source.stop()
-    source.disconnect()
-    gain.disconnect()
-  }, 800)
-}
-
 /**
  * Duck everything this module makes while JARVIS speaks.
  *
- * This used to touch only the synthesised bed, and return early when there
- * wasn't one — which there never is, because the ambient layer in the shipped
- * configuration comes from music.ts and startAmbient() below is a fallback
- * nothing currently calls. So it was a permanent no-op. The interface cues and
- * the bed both hang off the master, so ducking there is honest either way: with
- * the bed running it ducks the bed, and without it it still keeps a tool tick
- * or a completion chime from landing on top of a word.
+ * All interface cues hang off the master, so ducking prevents a tool tick or
+ * completion chime from landing over a spoken word.
  */
 export function duck(on: boolean) {
   if (ducked === on || !master) return

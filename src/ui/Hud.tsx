@@ -8,15 +8,11 @@ import { Pointer } from './Pointer'
 import { GestureGuide } from './GestureGuide'
 
 const statusText: Record<Phase, string> = {
-  offline: 'OFFLINE',
-  boot: 'INITIALISING',
-  dormant: 'STANDBY — SAY “HEY JARVIS”',
-  waking: 'ONLINE',
+  dormant: 'CONNECTED — PRESS TALK',
   listening: 'LISTENING',
   thinking: 'PROCESSING',
   tooling: 'ACCESSING SYSTEMS',
   speaking: 'RESPONDING',
-  returning_to_sleep: 'RETURNING TO SLEEP',
 }
 
 function Corner({ at }: { at: 'tl' | 'tr' | 'bl' | 'br' }) {
@@ -147,11 +143,9 @@ function DecodeText({ text }: { text: string }) {
 
 /* --------------------------------------------------------------------- hud */
 
-export function Hud({ onToggleWake, onToggleMic, onInstallWake, wakeInstallable }: { onToggleWake: () => void; onToggleMic: () => void; onInstallWake: () => void; wakeInstallable: boolean }) {
+export function Hud({ onTalk }: { onTalk: () => void }) {
   const phase = useStore((s) => s.phase)
-  const wakeEnabled = useStore((s) => s.wakeEnabled)
-  const wakeReady = useStore((s) => s.wakeReady)
-  const micMuted = useStore((s) => s.micMuted)
+  const bridgeReady = useStore((s) => s.bridgeReady)
   const caption = useStore((s) => s.caption)
   const turns = useStore((s) => s.turns)
   const activeTool = useStore((s) => s.activeTool)
@@ -159,7 +153,7 @@ export function Hud({ onToggleWake, onToggleMic, onInstallWake, wakeInstallable 
   const error = useStore((s) => s.error)
   const level = useStore((s) => s.level)
   const voice = useStore((s) => s.voice)
-  const bootNote = useStore((s) => s.bootNote)
+  const readinessNote = useStore((s) => s.readinessNote)
   const gestures = useStore((s) => s.gestures)
   const looking = useStore((s) => s.looking)
   const ui = useStore((s) => s.ui)
@@ -202,21 +196,11 @@ export function Hud({ onToggleWake, onToggleMic, onInstallWake, wakeInstallable 
         <div className="status">
           <span className="dot" />
           <span className="status-text">
-            {/* bootNote is the voice-model download readout. It is only ever
-                the right thing to show during boot — as a general fallback a
-                note that never got cleared (a stuck 'voice 97%') sits over
-                LISTENING and PROCESSING for the rest of the session. */}
-            {phase === 'boot' && bootNote ? bootNote : statusText[phase]}
+            {/* Keep readiness messages in idle state so they never cover active work. */}
+            {phase === 'dormant' && !bridgeReady ? 'CONNECTING TO LOCAL BRIDGE' : phase === 'dormant' && readinessNote ? readinessNote : statusText[phase]}
           </span>
         </div>
       </header>
-
-      <div className="voice-privacy-controls" aria-label="Voice privacy controls">
-        <button type="button" onClick={onToggleWake} disabled={phase === 'offline' || phase === 'boot'} aria-pressed={wakeEnabled}>Wake word {wakeEnabled ? 'ON' : 'OFF'}</button>
-        <button type="button" onClick={onToggleMic} disabled={phase === 'offline' || phase === 'boot'} aria-pressed={micMuted}>Microphone {micMuted ? 'MUTED' : 'ON'}</button>
-        {wakeEnabled && !wakeReady && wakeInstallable && <button type="button" onClick={onInstallWake}>Install local speech</button>}
-        <span>{micMuted ? 'MIC OFF' : phase === 'dormant' && wakeEnabled ? wakeReady ? 'LOCAL WAKE LISTENING' : 'LOCAL WAKE UNAVAILABLE' : phase === 'listening' ? 'MIC LISTENING' : 'MIC ON'}</span>
-      </div>
 
       {/* Left rail: which integrations are live */}
       {ui.chrome.systems && (
@@ -323,7 +307,10 @@ export function Hud({ onToggleWake, onToggleMic, onInstallWake, wakeInstallable 
 
       <footer className="hud-bottom">
         <span className="hint">
-          say <b>“hey jarvis”</b> · <kbd>Space</kbd> to talk · <kbd>G</kbd> hands
+          <button type="button" className="talk-button" onClick={onTalk} aria-label="Start microphone listening">
+            {phase === 'dormant' ? 'TALK' : 'MIC ON'}
+          </button>
+          {' · '}<kbd>Space</kbd> to talk · <kbd>Esc</kbd> to stop · <kbd>G</kbd> hands
           {voice && (
             <>
               {' · '}

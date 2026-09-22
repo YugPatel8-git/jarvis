@@ -1,15 +1,11 @@
 import { create } from 'zustand'
 
 export type Phase =
-  | 'offline'   // waiting for the click that unlocks audio
-  | 'boot'      // startup sequence
-  | 'dormant'   // powered down, waiting for the wake word
-  | 'waking'    // wake word hit, spin-up animation
+  | 'dormant'   // ready for manual activation
   | 'listening' // capturing speech
   | 'thinking'  // model is generating
   | 'tooling'   // an MCP tool is running
   | 'speaking'  // reading the answer back
-  | 'returning_to_sleep'
 
 /**
  * A card on the heads-up display.
@@ -213,12 +209,8 @@ const MAX_ORBITS = 8
 
 type State = {
   phase: Phase
-  wakeEnabled: boolean
-  wakeReady: boolean
-  micMuted: boolean
-  setWakeEnabled: (on: boolean) => void
-  setWakeReady: (ready: boolean) => void
-  setMicMuted: (on: boolean) => void
+  bridgeReady: boolean
+  setBridgeReady: (ready: boolean) => void
   /** 0..1 mic loudness, drives the reactor pulse. */
   level: number
   /** What JARVIS is currently reading aloud or has just said. */
@@ -235,8 +227,8 @@ type State = {
   /** Set while JARVIS is taking a look, to whatever he said he was looking for.
    *  null when he is not. The camera light is on either way — this says why. */
   looking: string | null
-  /** Transient status line during boot, e.g. the voice model download. */
-  bootNote: string
+  /** Transient readiness line while the optional local voice model loads. */
+  readinessNote: string
   /** Cards currently on the display, newest last. */
   panels: Panel[]
   /** Blades currently open, newest last — which is also front-most. */
@@ -251,7 +243,7 @@ type State = {
   setVoice: (v: string) => void
   setGestures: (on: boolean) => void
   setLooking: (why: string | null) => void
-  setBootNote: (n: string) => void
+  setReadinessNote: (n: string) => void
   pushPanel: (p: Panel) => void
   clearPanels: () => void
   pushBlade: (b: Blade) => void
@@ -278,16 +270,9 @@ type State = {
 }
 
 export const useStore = create<State>((set) => ({
-  phase: 'offline',
-  wakeEnabled: (() => { try { return localStorage.getItem('jarvis.wakeEnabled') !== 'false' } catch { return true } })(),
-  wakeReady: false,
-  micMuted: false,
-  setWakeReady: (wakeReady) => set({ wakeReady }),
-  setWakeEnabled: (wakeEnabled) => {
-    try { localStorage.setItem('jarvis.wakeEnabled', String(wakeEnabled)) } catch { /* storage blocked */ }
-    set({ wakeEnabled })
-  },
-  setMicMuted: (micMuted) => set({ micMuted }),
+  phase: 'dormant',
+  bridgeReady: false,
+  setBridgeReady: (bridgeReady) => set({ bridgeReady }),
   level: 0,
   caption: '',
   turns: [],
@@ -301,13 +286,13 @@ export const useStore = create<State>((set) => ({
   blades: [],
   focusedBlade: null,
   expandedBlade: null,
-  bootNote: '',
+  readinessNote: '',
   ui: defaultUi(),
 
   setVoice: (voice) => set({ voice }),
   setGestures: (gestures) => set({ gestures }),
   setLooking: (looking) => set({ looking }),
-  setBootNote: (bootNote) => set({ bootNote }),
+  setReadinessNote: (readinessNote) => set({ readinessNote }),
   // Three is as many as fits around the reactor without crowding it. Sticky
   // panels are exempt from the cull — the tool description promises they stay
   // until replaced, and a plain slice(-3) silently evicted them the moment a
@@ -433,15 +418,11 @@ export const useStore = create<State>((set) => ({
 
 /** Colour identity per phase — shared by the 3D scene and the 2D HUD. */
 export const phaseColor: Record<Phase, string> = {
-  offline: '#0d4a4a',
-  boot: '#17b3b3',
   dormant: '#12908f',
-  waking: '#5cf2ef',
   listening: '#19d8d2',
   thinking: '#f0a93c',
   tooling: '#a97bff',
   speaking: '#3ef2a8',
-  returning_to_sleep: '#12908f',
 }
 
 /**

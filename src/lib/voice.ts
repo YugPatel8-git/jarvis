@@ -3,23 +3,14 @@ import { getMic } from './audio'
 import { speakingNow, speakingSince } from './tts'
 import { startVad, type Vad } from './vad'
 import { caps } from './capabilities'
-import { hasWakePhrase, afterWakePhrase } from './wake-phrase'
 
 /**
- * The voice loop.
- *
- * When supported, one on-device recogniser handles both wake detection and
- * commands. Keeping its result buffer through wake preserves one-shot requests.
- * Other recognition engines only run after manual activation; standby audio
- * is never sent to a remote transcription service.
- *
- * Browser echo cancellation and text filtering reduce playback echo, but
- * speaker audio cannot be isolated perfectly from this microphone.
+ * Manual voice loop. A recognizer starts only after Talk or Space and stays
+ * active through the answer so the user can interrupt speech. Standing down
+ * stops it and releases the microphone.
  */
 
 export type VoiceMode =
-  /** Powered down. Only his name matters. */
-  | 'wake'
   /** He is expecting you to speak. Everything is a command. */
   | 'command'
   /** He is thinking or talking. Anything you say is an interruption. */
@@ -30,10 +21,6 @@ export type VoiceMode =
 export type VoiceHandlers = {
   /** Read fresh on every result, so the app never has to re-subscribe. */
   mode: () => VoiceMode
-  /** Fired on his name, from a partial — waiting for endpointing feels slow.
-   *  `trailing` is whatever followed it, so "Jarvis, what's the weather" is
-   *  one breath rather than two turns. */
-  onWake: (trailing: string) => void
   /** The user has genuinely started talking. This is the barge-in trigger. */
   onSpeechStart: () => void
   /** Live transcript, for the caption under the reactor. */
@@ -53,10 +40,6 @@ export type Voice = {
 // ---------------------------------------------------------------------------
 // Endpointing
 // ---------------------------------------------------------------------------
-
-/** One utterance often produces several partials containing his name. */
-const WAKE_DEBOUNCE = 1500
-
 
 // ---------------------------------------------------------------------------
 // Assembling one utterance out of several segments
@@ -235,7 +218,7 @@ const norm = (s: string) =>
  * would be the single most infuriating failure this file could have.
  */
 const OVERRIDE =
-  /\b(stop|wait|jarvis|cancel|enough|quiet|hold on|shut up|never ?mind|forget it|no)\b/i
+  /\b(stop|wait|cancel|enough|quiet|hold on|shut up|never ?mind|forget it|no)\b/i
 
 /**
  * Words too common to be evidence of anything.
@@ -289,28 +272,10 @@ function isEcho(heard: string, spoken: string): boolean {
 // Diagnostics
 // ---------------------------------------------------------------------------
 
-/**
- * Live state of the voice loop, published on `window.__voice`.
- *
- * When someone says the wake word and nothing happens there are only a handful
- * of possible causes — the recogniser never started, it started and died, it is
- * running but hearing silence, or it is hearing you and transcribing the name
- * as something else. From outside the page those are indistinguishable, which
- * makes the failure impossible to report and impossible to fix. This tells them
- * apart in one glance.
- */
+/** Live diagnostics for an active manual voice session. */
 export const diag = {
   /** Which input engine is running: 'elevenlabs' (VAD+Scribe) or 'browser'. */
   engine: 'browser',
-  wakeLocal: false,
-  wakeReady: false,
-  wakeInstallable: false,
-  wakeDetectedAt: 0,
-  hudWakingAt: 0,
-  listeningAt: 0,
-  recognitionStartedAt: 0,
-  transcriptAt: 0,
-  lastCommandAt: 0,
   /** Whether the microphone pipeline is live. */
   running: false,
   /** Speech segments captured since load. */
@@ -320,8 +285,6 @@ export const diag = {
   heardAt: 0,
   /** Last failure — a transcription error, or a capture error. */
   lastError: '',
-  /** Times the wake word matched. */
-  wakes: 0,
   /** Current mode, as the app last reported it. */
   mode: '',
   /** Why the last transcript was ignored — '' when it was accepted. */
@@ -350,11 +313,20 @@ if (typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__voice = diag
 }
 
-/** Select on-device recognition for wake when available. Other engines only
- * process commands after manual activation. */
+/**
+ * Pick the voice engine and start it.
+ *
+ * Two engines, chosen by the bridge capability probe (see capabilities.ts):
+ *   - ElevenLabs available -> local voice-activity detection for instant
+ *     barge-in, and ElevenLabs Scribe for the words. The reliable path.
+ *   - nothing configured -> the browser's own SpeechRecognition, so a student
+ *     with no keys still has a working assistant. Less robust, but free and
+ *     zero-setup, and guarded by a heartbeat so its silent death is recovered.
+ *
+ * The microphone is opened once here so a denied permission is reported loudly
+ * rather than surfacing later as an unexplained deafness, whichever engine runs.
+ */
 export async function startVoice(h: VoiceHandlers): Promise<Voice> {
-  diag.wakeReady = false
-  diag.wakeLocal = false
   try {
     await getMic()
   } catch (err) {
@@ -364,36 +336,16 @@ export async function startVoice(h: VoiceHandlers): Promise<Voice> {
         ? 'Microphone access denied — voice input is unavailable.'
         : 'No microphone available.',
     )
-    return { stop: () => {}, live: () => false }
+    throw err
   }
-  const Ctor = (window as any).SpeechRecognition
-  let localReady = false
-  diag.wakeInstallable = false
-  if (Ctor && 'processLocally' in Ctor.prototype && typeof Ctor.available === 'function') {
-    try {
-      const available = await Ctor.available({ langs: ['en-US'], processLocally: true })
-      localReady = available === 'available'
-      diag.wakeInstallable = !localReady && available !== 'unavailable' && typeof Ctor.install === 'function'
-    } catch { /* unsupported or blocked by permissions policy */ }
-  }
-  diag.wakeLocal = localReady
-  diag.wakeReady = localReady
-  diag.engine = localReady ? 'on-device browser' : caps().stt ? 'elevenlabs command only' : 'browser command only'
-  if (!localReady) h.onError('Local wake word is unavailable. Install the browser on-device English speech pack, or press Space to talk. Sleeping audio is not sent to speech services.')
-  return localReady ? startBrowserVoice(h, true) : caps().stt ? startElevenVoice(h) : startBrowserVoice(h, false)
-}
-
-/** Browser-managed language pack download, only from an explicit HUD click. */
-export async function installLocalWake(): Promise<boolean> {
-  const Ctor = (window as any).SpeechRecognition
-  if (typeof Ctor?.install !== 'function') return false
-  return Boolean(await Ctor.install({ langs: ['en-US'], processLocally: true }))
+  diag.engine = caps().stt ? 'elevenlabs' : 'browser'
+  return caps().stt ? startElevenVoice(h) : startBrowserVoice(h)
 }
 
 /** VAD + ElevenLabs Scribe. */
 async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
   let vad: Vad | null = null
-  let captureMode: VoiceMode = 'deaf'
+  let stopped = false
 
   /**
    * Segments waiting for the transcriber, oldest first.
@@ -434,8 +386,9 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
    * now, not the one they interrupted.
    */
   const transcribe = async (blob: Blob) => {
+    if (stopped) return
     const mode = h.mode()
-    if (mode === 'deaf' || mode === 'wake') return
+    if (mode === 'deaf') return
     const t0 = performance.now()
     try {
       const res = await fetch(`${BRIDGE_HTTP_URL}/stt`, {
@@ -451,6 +404,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
         return
       }
       const { text } = (await res.json()) as { text?: string }
+      if (stopped) return
       const said = (text ?? '').trim()
       diag.lastError = ''
 
@@ -484,7 +438,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
     if (draining) return
     draining = true
     try {
-      while (pendingAudio.length) {
+      while (!stopped && pendingAudio.length) {
         await transcribe(pendingAudio.shift()!)
       }
     } finally {
@@ -495,13 +449,11 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
   vad = await startVad({
     onStart: () => {
       const mode = h.mode()
-      captureMode = mode
       diag.mode = mode
       diag.sessions++
       if (mode === 'deaf') return
       // Standing down mid-thought throws the thought away with it. Otherwise
       // held text would surface as the opening of the *next* conversation.
-      if (mode === 'wake') assemble.cancel()
       // The barge-in. In guard mode the user has started talking over him, and
       // because the guard threshold is high this is a real interruption rather
       // than leaked playback — so cut him off now, do not wait for the words.
@@ -515,7 +467,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
       }
     },
     onEnd: (blob) => {
-      if (captureMode === 'wake' || captureMode === 'deaf' || h.mode() === 'wake' || h.mode() === 'deaf') return
+      if (stopped) return
       pendingAudio.push(blob)
       void drain()
     },
@@ -537,6 +489,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
     },
   })
   diag.running = vad.live()
+  if (!diag.running) throw new Error('Microphone capture is unavailable.')
 
   // Raise the trigger bar exactly while he speaks. The mode is polled rather
   // than pushed because nothing in the app pushes phase changes here, and a
@@ -545,14 +498,16 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
     const mode = h.mode()
     vad?.setGuard(mode === 'guard')
     // He has stood down — by Escape, by the idle timeout, or by dropping back
-    // to the wake word. Anything half-said belonged to a conversation that is
+    // to idle. Anything half-said belonged to a conversation that is
     // over, and letting the hold expire later would open the next one with a
     // fragment of the last.
-    if ((mode === 'wake' || mode === 'deaf') && assemble.held()) assemble.cancel()
+    if (mode === 'deaf' && assemble.held()) assemble.cancel()
   }, 200)
 
   return {
     stop: () => {
+      stopped = true
+      pendingAudio.length = 0
       clearInterval(guardPoll)
       assemble.cancel()
       vad?.stop()
@@ -566,14 +521,13 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
 /* Browser fallback: SpeechRecognition                                        */
 /* -------------------------------------------------------------------------- */
 
-/** Browser recognizer. localOnly enforces on-device processing for wake mode.
- * The command-only fallback is stopped throughout standby. */
-function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
+/** Browser recognition for a manually opened voice session. */
+function startBrowserVoice(h: VoiceHandlers): Voice {
   const Ctor =
     (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition
   if (!Ctor) {
     h.onError('This browser has no speech recognition — use Chrome or Edge, or add an ElevenLabs key.')
-    return { stop: () => {}, live: () => false }
+    throw new Error('Speech recognition is unavailable in this browser.')
   }
 
   let stopped = false
@@ -583,9 +537,7 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
   let interim = ''
   let started = false
   let barged = false
-  let lastWake = 0
   let lastAlive = Date.now()
-  let lastMode = h.mode()
   let silenceTimer: ReturnType<typeof setTimeout> | null = null
 
   /** Same assembly rules as the premium path — a pause is not a full stop. */
@@ -619,11 +571,7 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
   const emit = () => {
     const text = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
     const mode = h.mode()
-    if (text) diag.transcriptAt = performance.now()
     reset()
-    // Start a fresh recognition session after endpointing so Chrome does not
-    // replay earlier final results as the next utterance.
-    try { rec?.abort() } catch { /* already ended */ }
     if (!text || mode === 'deaf') return
     if (isEcho(text, speakingNow())) {
       drop('echo of his own voice')
@@ -631,7 +579,6 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
     }
     diag.heard = text
     diag.heardAt = Date.now()
-    if (mode === 'wake') { assemble.cancel(); return }
     // The recogniser has already endpointed on its own 900ms gap; the assembler
     // decides whether that gap actually ended the thought. `false` because a
     // result only reaches here once the recogniser has gone quiet.
@@ -655,7 +602,7 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
     }
     let fresh = ''
     interim = ''
-    for (let i = 0; i < e.results.length; i++) {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
       const chunk = e.results[i][0].transcript as string
       if (e.results[i].isFinal) fresh += chunk
       else interim += chunk
@@ -667,33 +614,8 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
       return
     }
 
-    if (mode === 'wake') {
-      if (speakingNow()) {
-        drop('own speech active or echo tail')
-        return
-      }
-      settled = fresh
-      if (hasWakePhrase(heard) && Date.now() - lastWake > WAKE_DEBOUNCE) {
-        lastWake = Date.now()
-        diag.wakes++
-        diag.wakeDetectedAt = performance.now()
-        // Keep this recognition session and its transcript. The same breath
-        // may contain the command, so restarting here would clip its first word.
-        h.onWake('')
-        const trailing = afterWakePhrase(heard)
-        if (trailing) {
-          h.onPartial(trailing)
-          bumpSilence()
-        }
-      } else if (settled.length > 400) {
-        settled = ''
-      }
-      return
-    }
-
-    settled = fresh
+    settled += fresh
     const full = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
-    if (hasWakePhrase(full) && !afterWakePhrase(full)) return
     if (!started || (mode === 'guard' && !barged)) {
       const words = full.split(/\s+/).filter(Boolean).length
       if (mode === 'guard') {
@@ -730,15 +652,11 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
 
   const spin = () => {
     if (stopped || running) return
-    if (h.mode() === 'deaf') return
-    if (!localOnly && (h.mode() === 'wake' || h.mode() === 'deaf')) return
     rec = new Ctor()
-    if (localOnly) rec.processLocally = true
     rec.continuous = true
     rec.interimResults = true
-    rec.lang = localOnly ? 'en-US' : 'en-GB'
+    rec.lang = 'en-GB'
     rec.onstart = () => {
-      diag.recognitionStartedAt = performance.now()
       running = true
       diag.running = true
       diag.sessions++
@@ -747,14 +665,6 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
     rec.onresult = onResult
     rec.onerror = (ev: any) => {
       diag.lastError = String(ev.error ?? '')
-      if (localOnly && ev.error === 'language-not-supported') {
-        localOnly = false
-        diag.wakeReady = false
-        diag.running = false
-        h.onError('The on-device English language pack is unavailable. Wake listening has stopped; press Space to talk.')
-        try { rec?.abort() } catch { /* already ended */ }
-        return
-      }
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         stopped = true
         diag.running = false
@@ -782,11 +692,6 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
   // gone quiet on us — tear it down and build a fresh one.
   const health = setInterval(() => {
     if (stopped) return
-    if (h.mode() === 'deaf' || (!localOnly && h.mode() === 'wake')) {
-      if (rec) { try { rec.abort() } catch { /* already ended */ } }
-      return
-    }
-    if (!running && !rec) { spin(); return }
     const idle = Date.now() - lastAlive
     diag.idleMs = idle
     if (idle < 15000) return
@@ -803,25 +708,10 @@ function startBrowserVoice(h: VoiceHandlers, localOnly: boolean): Voice {
     spin()
   }, 5000)
 
-  const modePoll = setInterval(() => {
-    if (stopped) return
-    const mode = h.mode()
-    if (mode === 'wake' && lastMode !== 'wake') {
-      reset()
-      assemble.cancel()
-      try { rec?.abort() } catch { /* already ended */ }
-    }
-    lastMode = mode
-    if (mode === 'deaf' || (!localOnly && mode === 'wake')) {
-      if (rec) { try { rec.abort() } catch { /* already ended */ } }
-    } else if (!running && !rec) spin()
-  }, 150)
-
   return {
     stop: () => {
       stopped = true
       clearInterval(health)
-      clearInterval(modePoll)
       clearSilence()
       assemble.cancel()
       diag.running = false

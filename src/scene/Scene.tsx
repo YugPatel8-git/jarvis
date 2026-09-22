@@ -16,22 +16,16 @@ import { useStore, phaseColor, accentFor, type Phase } from '../store'
 
 /** Rings spin harder while JARVIS is working — reads as effort. */
 const spinFor: Record<Phase, number> = {
-  offline: 0.08, // barely turning — the machine is off
-  boot: 3.2,
   dormant: 0.25,
-  waking: 4.5,
   listening: 1.1,
   thinking: 2.8,
   tooling: 3.6,
   speaking: 1.4,
-  returning_to_sleep: 0.25,
 }
 
 /**
- * Surface displacement amplitude. Both states where nothing is happening get
- * the calm figure: 'offline' is the quietest moment in the whole piece — the
- * reactor hasn't been powered on yet — so it must not be the most agitated
- * thing on screen.
+ * Surface displacement is calm while idle and modestly more active during a
+ * conversation.
  */
 /*
  * Much lower than they were. At 0.13/0.26 on a unit sphere the displacement is
@@ -48,9 +42,8 @@ const AMP_LIVE = 0.085
  * These used to be render-time props, which had two consequences. The scene
  * subscribed to mic level, so the entire r3f tree reconciled sixty times a
  * second for numbers that never leave useFrame; and because they were only
- * delivered on a re-render, they were delivered late or — before the analyser
- * starts and `level` is a constant zero — not at all, which is why the ignition
- * screen never picked up its own spin rate.
+ * delivered on a re-render, they were delivered late or, before the analyser
+ * starts, not at all.
  *
  * Nothing here belongs in React state. The scene is updated by mutation and
  * React only ever mounts it: Rig writes this object once per frame, the
@@ -66,8 +59,6 @@ export type Drive = {
   spin: number
   /** Target displacement amplitude for the core surface. */
   amp: number
-  /** 0..1 power-up reveal — the ring assembles outwards from the centre. */
-  open: number
   /**
    * The reactor slice of the ui state, already resolved and smoothed.
    *
@@ -110,13 +101,12 @@ const STYLE_INDEX = { ring: 0, sphere: 1, wire: 2 } as const
 function Rig() {
   const drive = useMemo<Drive>(
     () => ({
-      color: new THREE.Color(phaseColor.offline),
+      color: new THREE.Color(phaseColor.dormant),
       level: 0,
-      spin: spinFor.offline,
+      spin: spinFor.dormant,
       amp: AMP_CALM,
-      open: 0,
       reactor: {
-        color: new THREE.Color(phaseColor.offline),
+        color: new THREE.Color(phaseColor.dormant),
         scale: 1,
         intensity: 1,
         spin: 1,
@@ -158,13 +148,10 @@ function Rig() {
     drive.reactor.visible = r.visible
 
     drive.spin += (spinFor[phase] - drive.spin) * Math.min(1, dt * 2)
-    drive.amp = phase === 'dormant' || phase === 'offline' ? AMP_CALM : AMP_LIVE
-    // Held shut until the reactor is powered on, so the ring builds itself out
-    // of the centre on the ignition click rather than simply appearing.
-    drive.open = phase === 'offline' ? 0.28 : phase === 'boot' ? 0.7 : 1.6
+    drive.amp = phase === 'dormant' ? AMP_CALM : AMP_LIVE
 
     // Idle breathing so the orb is never completely still.
-    const idle = phase === 'offline' ? 0.02 : phase === 'dormant' ? 0.05 : 0.12
+    const idle = phase === 'dormant' ? 0.05 : 0.12
     const breathe =
       (Math.sin(state.clock.elapsedTime * 0.9) * 0.5 + 0.5) * idle
     const want = Math.max(level, breathe)

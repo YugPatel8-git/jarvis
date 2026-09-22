@@ -243,7 +243,7 @@ export function currentVoiceName(): string {
   return pickVoice()?.name ?? 'default'
 }
 
-/** Start voice/model loading on page load; unlock output on the ignition gesture. */
+/** Start voice/model loading on page load; unlock output on the Talk gesture. */
 export function prewarmSpeech(unlockOutput = false): void {
   pickVoice()
   if (unlockOutput) outputContext()

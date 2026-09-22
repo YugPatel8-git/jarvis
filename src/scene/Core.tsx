@@ -229,7 +229,7 @@ export function Core({ drive }: { drive: Drive }) {
       uHot: { value: new THREE.Color('#c9fdff') },
       uLevel: { value: 0 },
       uPhase: { value: 0 },
-      uOpen: { value: 0 },
+      uOpen: { value: 1.6 },
       // Field scale, recomputed every frame from the viewport — see below.
       uZoom: { value: 1.2 },
       // Both of these are deliberately identities at their defaults: the ring
@@ -260,7 +260,6 @@ export function Core({ drive }: { drive: Drive }) {
     // edge would boil harder the longer the tab had been open. The spin
     // multiplier rides on the same accumulator for the same reason.
     u.uPhase.value += dt * (0.5 + u.uLevel.value * 0.7) * r.spin
-    u.uOpen.value += (drive.open - u.uOpen.value) * Math.min(1, dt * 1.6)
     u.uIntensity.value = r.intensity
     u.uStyle.value = r.style
     ;(u.uColor.value as THREE.Color).lerp(r.color, Math.min(1, dt * 2.5))

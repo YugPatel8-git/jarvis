@@ -21,6 +21,7 @@ export async function getMic(): Promise<MediaStream> {
   return stream
 }
 
+/** Manual voice sessions release the microphone when their follow-up window ends. */
 export function releaseMic(): void {
   stream?.getTracks().forEach((track) => track.stop())
   stream = null
@@ -35,6 +36,7 @@ export async function startAnalyser(): Promise<void> {
   if (analyser) return
   const s = await getMic()
   ctx = new AudioContext()
+  void ctx.resume()
   const src = ctx.createMediaStreamSource(s)
   analyser = ctx.createAnalyser()
   analyser.fftSize = 512

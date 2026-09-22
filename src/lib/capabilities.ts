@@ -1,7 +1,7 @@
 import { BACKEND, BRIDGE_HTTP_URL, env } from '../config'
 
 /**
- * What speech engines are actually available, decided once at boot.
+ * What speech engines are available, probed during page startup.
  *
  * The whole point is that the app runs for anyone. A student who has done
  * nothing but install Codex CLI and log in gets the browser's own speech
@@ -29,7 +29,7 @@ let current: Capabilities = { stt: false, tts: false }
 let probed = false
 
 /** The last known capabilities. Read synchronously by the voice and speech
- *  layers; accurate once `probeCapabilities` has resolved during boot. */
+ *  layers; accurate once `probeCapabilities` has resolved. */
 export function caps(): Capabilities {
   return current
 }
@@ -39,9 +39,9 @@ export function capabilitiesProbed(): boolean {
 }
 
 /**
- * Ask the bridge what it can do, once. Called during the boot sequence, before
- * the voice loop starts, so the first "Hey Jarvis" already uses the right
- * engine. Never throws: a failed probe simply leaves the browser fallback in
+ * Ask the bridge what it can do during page startup. Manual voice activation
+ * awaits this probe, so the first request uses the right engine. Never throws:
+ * a failed probe simply leaves the browser fallback in
  * place, which is the correct behaviour when the bridge is unreachable.
  */
 export async function probeCapabilities(): Promise<Capabilities> {
@@ -61,7 +61,7 @@ export async function probeCapabilities(): Promise<Capabilities> {
     }
   } catch {
     // Bridge down or slow — stay on the browser engines rather than blocking
-    // boot on a health check that is only an optimisation.
+    // manual activation on a health check that is only an optimisation.
   }
   probed = true
   return current

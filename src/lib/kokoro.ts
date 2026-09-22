@@ -11,8 +11,8 @@
  * carries four British male voices, which is what this project actually wants.
  *
  * The cost is a one-time ~86MB model download, cached by the browser
- * afterwards. It's fetched during the boot sequence so the first "Hey Jarvis"
- * isn't waiting on it, and anything that goes wrong falls back to Daniel.
+ * afterwards. It loads in the background after page render, and anything that
+ * goes wrong falls back to the system voice.
  */
 
 import { KOKORO_VOICE } from '../config'
@@ -28,7 +28,7 @@ let model: Kokoro | null = null
 let loading: Promise<Kokoro | null> | null = null
 let failed = false
 
-/** 0..1 while the model downloads, for the boot readout. */
+/** 0..1 while the model downloads, for the readiness readout. */
 let progress = 0
 export const loadProgress = () => progress
 export const isReady = () => model !== null

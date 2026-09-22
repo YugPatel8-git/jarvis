@@ -19,10 +19,8 @@
     "setup": "node scripts/setup.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.2",
     "@mediapipe/tasks-vision": "^1.0.1",
-    "@picovoice/porcupine-web": "^4.0.1",
-    "@picovoice/web-voice-processor": "^4.0.10",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.7.0",
     "@react-three/postprocessing": "^3.0.4",

@@ -30,5 +30,4 @@ export const env = {
   // These optional browser services are unrelated to model authentication.
   elevenKey: '',
   elevenVoiceId: 'JBFqnCBsd6RMkjVDRZzb',
-  porcupineKey: str(import.meta.env.VITE_PICOVOICE_ACCESS_KEY) ?? '',
 }
