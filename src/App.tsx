@@ -5,7 +5,7 @@ import { Boot } from './ui/Boot'
 import { Ignition } from './ui/Ignition'
 import { Diagnostics } from './ui/Diagnostics'
 import { useStore } from './store'
-import { startVoice, type Voice, type VoiceMode } from './lib/voice'
+import { startVoice, installLocalWake, diag as voiceDiag, type Voice, type VoiceMode } from './lib/voice'
 import { createSpeaker, cycleVoice, currentVoiceName, prewarmSpeech } from './lib/tts'
 import { wantsLiteralTechnicalSpeech } from './lib/speech-text'
 import * as sfx from './lib/sfx'
@@ -15,7 +15,6 @@ import { listenForClap } from './lib/clap'
 import * as camera from './lib/camera'
 import * as kokoro from './lib/kokoro'
 import { TTS_ENGINE } from './config'
-import { attention } from './lib/fillers'
 import {
   ask,
   warm,
@@ -29,8 +28,9 @@ import {
   connectedLabels,
   type Msg,
 } from './lib/brain'
-import { startAnalyser, micLevel } from './lib/audio'
+import { startAnalyser, micLevel, releaseMic } from './lib/audio'
 import { probeCapabilities } from './lib/capabilities'
+import { commandAfterWake } from './lib/wake-phrase'
 
 /**
  * The conversation.
@@ -60,13 +60,8 @@ const newId = () =>
   globalThis.crypto?.randomUUID?.() ??
   `id${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
 
-/** The same mishearings voice.ts accepts for the wake word — otherwise a turn
- *  that woke him as "travis" gets that word sent on to the model as a question. */
-const NAME = '(?:jarvis|jarvys|jervis|travis|jarviss|java\'s|jarv)'
-/** A bare vocative — "Jarvis", "hey jarvis" — with nothing asked. */
-const BARE_NAME = new RegExp(`^(?:hey|hi|ok|okay|yo)?\\s*${NAME}[\\s,.!?]*$`, 'i')
-/** A leading vocative on a real command: "Jarvis, what's the weather". */
-const LEADING_NAME = new RegExp(`^(?:hey|hi|ok|okay|yo)?\\s*${NAME}\\b[\\s,.:!?-]*`, 'i')
+/** A bare vocative in command mode starts another capture window. */
+const BARE_NAME = /^(?:hey[,]?\s+)?jarvis[\s,.!?]*$/i
 
 export default function App() {
   const store = useStore
@@ -84,6 +79,7 @@ export default function App() {
   const booting = useRef(false)
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const voicePoll = useRef<ReturnType<typeof setInterval> | null>(null)
+  const wakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // -- helpers --------------------------------------------------------------
 
@@ -107,11 +103,15 @@ export default function App() {
     music.working(false)
     music.duck(false)
     sfx.duck(false)
-    s.setPhase('dormant')
+    s.setPhase('returning_to_sleep')
+    setTimeout(() => {
+      if (store.getState().phase === 'returning_to_sleep') store.getState().setPhase('dormant')
+    }, 120)
   }
 
   /** Open the mic and wait. `window` is how long before he gives up. */
   const listen = (window: number) => {
+    voiceDiag.listeningAt = performance.now()
     clearIdle()
     const s = store.getState()
     s.setCaption('')
@@ -123,6 +123,9 @@ export default function App() {
   // -- one turn -------------------------------------------------------------
 
   const respond = async (said: string): Promise<void> => {
+    if (wakeTimer.current) clearTimeout(wakeTimer.current)
+    const wd = (window as unknown as Record<string, any>).__voice
+    if (wd) wd.lastCommandAt = performance.now()
     const mine = ++turn.current
     const stale = () => mine !== turn.current
 
@@ -221,9 +224,10 @@ export default function App() {
     switch (store.getState().phase) {
       case 'offline':
       case 'boot':
+      case 'returning_to_sleep':
         return 'deaf'
       case 'dormant':
-        return 'wake'
+        return store.getState().wakeEnabled && !store.getState().micMuted ? 'wake' : 'deaf'
       case 'waking':
       case 'listening':
         return 'command'
@@ -236,6 +240,7 @@ export default function App() {
     const phase = store.getState().phase
     if (phase === 'offline' || phase === 'boot') return
 
+    if (!store.getState().wakeEnabled || store.getState().micMuted) return
     store.getState().setError(null)
     sfx.play('wake')
 
@@ -247,16 +252,13 @@ export default function App() {
     }
 
     store.getState().setPhase('waking')
-
-    // Answer to his name. Deliberately NOT awaited any more: the microphone is
-    // already open and the echo filter knows his voice, so the user can talk
-    // straight over the greeting instead of waiting it out.
-    const greeting = createSpeaker()
-    speaker.current = greeting
-    greeting.say(attention())
-    void greeting.end()
-
-    listen(AWAIT_SPEECH_MS)
+    voiceDiag.hudWakingAt = performance.now()
+    // Visual feedback first. Keep the same recognition session so a command
+    // following the wake phrase in one breath is still in its result buffer.
+    if (wakeTimer.current) clearTimeout(wakeTimer.current)
+    wakeTimer.current = setTimeout(() => {
+      if (store.getState().phase === 'waking') listen(AWAIT_SPEECH_MS)
+    }, 120)
   }
 
   /**
@@ -266,7 +268,7 @@ export default function App() {
   const onSpeechStart = () => {
     clearIdle()
     const phase = store.getState().phase
-    if (phase === 'offline' || phase === 'boot' || phase === 'dormant') return
+    if (phase === 'offline' || phase === 'boot' || phase === 'dormant' || phase === 'returning_to_sleep') return
 
     const wasBusy =
       phase === 'thinking' || phase === 'tooling' || phase === 'speaking'
@@ -287,7 +289,7 @@ export default function App() {
 
   const onUtterance = (text: string) => {
     const phase = store.getState().phase
-    if (phase === 'offline' || phase === 'boot' || phase === 'dormant') return
+    if (phase === 'offline' || phase === 'boot' || phase === 'dormant' || phase === 'returning_to_sleep') return
 
     // People keep using his name as a vocative once they're already talking to
     // him. Strip it rather than sending "jarvis" to the model as a question.
@@ -295,7 +297,7 @@ export default function App() {
       listen(AWAIT_SPEECH_MS)
       return
     }
-    const said = text.replace(LEADING_NAME, '').trim()
+    const said = commandAfterWake(text)
     if (!said) {
       listen(AWAIT_SPEECH_MS)
       return
@@ -310,6 +312,7 @@ export default function App() {
 
   const onVoiceError = (message: string) => {
     store.getState().setError(message)
+    if (!voiceDiag.wakeReady) store.getState().setWakeReady(false)
   }
 
   // -- power on -------------------------------------------------------------
@@ -482,38 +485,16 @@ export default function App() {
     // status bar, rings, suit schematic, reactor power-up — before the live
     // interface takes over. Kept a touch under the boot cue so the music is
     // still rising as the reactor lands.
+    const speechSetup = (async () => {
+      try { await startAnalyser() } catch { console.warn('[jarvis] microphone analyser unavailable') }
+      await probeCapabilities()
+      voice.current = await startVoice({ mode, onWake, onSpeechStart, onPartial, onUtterance, onError: onVoiceError })
+      store.getState().setWakeReady(voiceDiag.wakeReady)
+    })()
     await new Promise((r) => setTimeout(r, 9200)) // boot sequence
-    await warming
+    await Promise.all([warming, speechSetup])
     store.getState().setConnected(connectedLabels())
     store.getState().setVoice(currentVoiceName())
-
-    // The analyser is what makes the reactor pulse with your voice. It needs a
-    // getUserMedia stream; speech recognition does not, and gets its own. So a
-    // failure here costs the animation and nothing else — saying "voice input
-    // is unavailable" was both alarming and untrue.
-    try {
-      await startAnalyser()
-    } catch {
-      console.warn(
-        '[jarvis] no microphone stream — the reactor will not pulse with your ' +
-          'voice. Speech recognition is unaffected.',
-      )
-    }
-
-    // Ask the bridge which speech engines exist before the loop starts, so the
-    // first turn already uses ElevenLabs when a key is present and the browser
-    // fallback when it is not — no flag, no reload.
-    await probeCapabilities()
-
-    // One voice loop, started once, running until the page closes.
-    voice.current = await startVoice({
-      mode,
-      onWake,
-      onSpeechStart,
-      onPartial,
-      onUtterance,
-      onError: onVoiceError,
-    })
 
     store.getState().setPhase('dormant')
   }
@@ -685,6 +666,8 @@ export default function App() {
       clearIdle()
       if (voicePoll.current) clearInterval(voicePoll.current)
       voice.current?.stop()
+      store.getState().setWakeReady(false)
+      releaseMic()
       speaker.current?.cancel()
       // The camera must not outlive the page that turned it on.
       hands.disableHands()
@@ -692,10 +675,48 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const toggleWake = () => {
+    const s = store.getState()
+    if (s.phase === 'offline' || s.phase === 'boot') return
+    s.setWakeEnabled(!s.wakeEnabled)
+    if (s.wakeEnabled && s.phase === 'listening') goDormant()
+  }
+
+  const toggleMic = () => {
+    const s = store.getState()
+    if (s.phase === 'offline' || s.phase === 'boot') return
+    const muted = !s.micMuted
+    s.setMicMuted(muted)
+    if (muted) {
+      goDormant()
+      voice.current?.stop()
+      voice.current = null
+      s.setWakeReady(false)
+      releaseMic()
+      s.setLevel(0)
+    } else {
+      void startVoice({ mode, onWake, onSpeechStart, onPartial, onUtterance, onError: onVoiceError })
+        .then((next) => { voice.current = next; store.getState().setWakeReady(voiceDiag.wakeReady) })
+    }
+  }
+
+  const installWake = () => {
+    void installLocalWake().then(async (installed) => {
+      if (!installed) {
+        store.getState().setError('The browser could not install on-device English recognition.')
+        return
+      }
+      voice.current?.stop()
+      if (store.getState().micMuted) return
+      voice.current = await startVoice({ mode, onWake, onSpeechStart, onPartial, onUtterance, onError: onVoiceError })
+      store.getState().setWakeReady(voiceDiag.wakeReady)
+    }).catch((err) => store.getState().setError(`Local speech installation failed: ${String(err)}`))
+  }
+
   return (
     <>
       <Scene />
-      <Hud />
+      <Hud onToggleWake={toggleWake} onToggleMic={toggleMic} onInstallWake={installWake} wakeInstallable={voiceDiag.wakeInstallable} />
       <Boot />
       <Diagnostics />
       <Ignition onStart={() => void powerOn()} />

@@ -24,6 +24,7 @@ const spinFor: Record<Phase, number> = {
   thinking: 2.8,
   tooling: 3.6,
   speaking: 1.4,
+  returning_to_sleep: 0.25,
 }
 
 /**

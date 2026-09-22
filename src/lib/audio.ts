@@ -10,7 +10,7 @@ let analyser: AnalyserNode | null = null
 let buf: Uint8Array | null = null
 
 export async function getMic(): Promise<MediaStream> {
-  if (stream) return stream
+  if (stream?.getAudioTracks().some((track) => track.readyState === 'live')) return stream
   stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
@@ -19,6 +19,16 @@ export async function getMic(): Promise<MediaStream> {
     },
   })
   return stream
+}
+
+export function releaseMic(): void {
+  stream?.getTracks().forEach((track) => track.stop())
+  stream = null
+  analyser?.disconnect()
+  analyser = null
+  buf = null
+  if (ctx) void ctx.close()
+  ctx = null
 }
 
 export async function startAnalyser(): Promise<void> {

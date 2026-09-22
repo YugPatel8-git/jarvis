@@ -16,6 +16,7 @@ const statusText: Record<Phase, string> = {
   thinking: 'PROCESSING',
   tooling: 'ACCESSING SYSTEMS',
   speaking: 'RESPONDING',
+  returning_to_sleep: 'RETURNING TO SLEEP',
 }
 
 function Corner({ at }: { at: 'tl' | 'tr' | 'bl' | 'br' }) {
@@ -146,8 +147,11 @@ function DecodeText({ text }: { text: string }) {
 
 /* --------------------------------------------------------------------- hud */
 
-export function Hud() {
+export function Hud({ onToggleWake, onToggleMic, onInstallWake, wakeInstallable }: { onToggleWake: () => void; onToggleMic: () => void; onInstallWake: () => void; wakeInstallable: boolean }) {
   const phase = useStore((s) => s.phase)
+  const wakeEnabled = useStore((s) => s.wakeEnabled)
+  const wakeReady = useStore((s) => s.wakeReady)
+  const micMuted = useStore((s) => s.micMuted)
   const caption = useStore((s) => s.caption)
   const turns = useStore((s) => s.turns)
   const activeTool = useStore((s) => s.activeTool)
@@ -206,6 +210,13 @@ export function Hud() {
           </span>
         </div>
       </header>
+
+      <div className="voice-privacy-controls" aria-label="Voice privacy controls">
+        <button type="button" onClick={onToggleWake} disabled={phase === 'offline' || phase === 'boot'} aria-pressed={wakeEnabled}>Wake word {wakeEnabled ? 'ON' : 'OFF'}</button>
+        <button type="button" onClick={onToggleMic} disabled={phase === 'offline' || phase === 'boot'} aria-pressed={micMuted}>Microphone {micMuted ? 'MUTED' : 'ON'}</button>
+        {wakeEnabled && !wakeReady && wakeInstallable && <button type="button" onClick={onInstallWake}>Install local speech</button>}
+        <span>{micMuted ? 'MIC OFF' : phase === 'dormant' && wakeEnabled ? wakeReady ? 'LOCAL WAKE LISTENING' : 'LOCAL WAKE UNAVAILABLE' : phase === 'listening' ? 'MIC LISTENING' : 'MIC ON'}</span>
+      </div>
 
       {/* Left rail: which integrations are live */}
       {ui.chrome.systems && (

@@ -9,6 +9,7 @@ export type Phase =
   | 'thinking'  // model is generating
   | 'tooling'   // an MCP tool is running
   | 'speaking'  // reading the answer back
+  | 'returning_to_sleep'
 
 /**
  * A card on the heads-up display.
@@ -212,6 +213,12 @@ const MAX_ORBITS = 8
 
 type State = {
   phase: Phase
+  wakeEnabled: boolean
+  wakeReady: boolean
+  micMuted: boolean
+  setWakeEnabled: (on: boolean) => void
+  setWakeReady: (ready: boolean) => void
+  setMicMuted: (on: boolean) => void
   /** 0..1 mic loudness, drives the reactor pulse. */
   level: number
   /** What JARVIS is currently reading aloud or has just said. */
@@ -272,6 +279,15 @@ type State = {
 
 export const useStore = create<State>((set) => ({
   phase: 'offline',
+  wakeEnabled: (() => { try { return localStorage.getItem('jarvis.wakeEnabled') !== 'false' } catch { return true } })(),
+  wakeReady: false,
+  micMuted: false,
+  setWakeReady: (wakeReady) => set({ wakeReady }),
+  setWakeEnabled: (wakeEnabled) => {
+    try { localStorage.setItem('jarvis.wakeEnabled', String(wakeEnabled)) } catch { /* storage blocked */ }
+    set({ wakeEnabled })
+  },
+  setMicMuted: (micMuted) => set({ micMuted }),
   level: 0,
   caption: '',
   turns: [],
@@ -425,6 +441,7 @@ export const phaseColor: Record<Phase, string> = {
   thinking: '#f0a93c',
   tooling: '#a97bff',
   speaking: '#3ef2a8',
+  returning_to_sleep: '#12908f',
 }
 
 /**

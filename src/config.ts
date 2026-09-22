@@ -32,4 +32,3 @@ export const env = {
   elevenVoiceId: 'JBFqnCBsd6RMkjVDRZzb',
   porcupineKey: str(import.meta.env.VITE_PICOVOICE_ACCESS_KEY) ?? '',
 }
-export const WAKE_ENGINE: 'speech' | 'porcupine' = env.porcupineKey ? 'porcupine' : 'speech'

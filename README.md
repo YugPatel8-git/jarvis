@@ -48,6 +48,28 @@ The boot sequence, HUD, wake word, microphone flow, browser speech recognition,
 system/Kokoro text-to-speech, gesture controls, camera blade, effects, diagnostics,
 WebSocket conversation transport, and barge-in UI remain in the frontend.
 
+### Local wake word
+
+After initialization, wake listening uses the browser's on-device English speech
+recognition (`processLocally: true`). It only activates when that API reports an
+installed local language pack. The HUD offers an explicit **Install local speech**
+button when the browser can download the pack. If on-device recognition is not
+available, wake listening stays off; press **Space** for a command. The app does
+not use cloud browser transcription or the bridge STT service to watch for the
+wake phrase.
+
+The wake phrase is **Hey Jarvis** (including “Hey, Jarvis”). The wake and a
+following command stay in the same recognition session, so “Hey Jarvis, open
+Chrome” can be one utterance. The Wake word and Microphone controls are visible
+in the HUD. Microphone mute stops the capture stream; wake preference persists
+in this browser.
+
+The JARVIS tab must remain open, with microphone permission granted. Background
+tabs or minimized Chrome may throttle browser recognition, and a closed browser
+cannot wake this web app. Speaker echo cancellation and text echo filtering
+reduce self-wakes, but a video or another person audibly saying “Hey Jarvis”
+cannot be reliably distinguished from the user by a browser microphone.
+
 Phase 3 temporarily disables model-driven panels/blades, camera-to-model vision,
 legacy browser control, global MCP tools, and ElevenLabs bridge speech.
 These can be reintroduced later as explicit, least-privilege Codex capabilities.

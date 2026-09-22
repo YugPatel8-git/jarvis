@@ -84,6 +84,27 @@ body::after {
   padding: 0 92px;
 }
 
+.voice-privacy-controls {
+  position: absolute;
+  top: 72px;
+  right: 28px;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font: 10px/1.2 monospace;
+  letter-spacing: .08em;
+  color: var(--accent);
+}
+.voice-privacy-controls button {
+  background: rgba(0, 0, 0, .55);
+  color: inherit;
+  border: 1px solid currentColor;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.voice-privacy-controls button:focus-visible { outline: 2px solid white; }
+
 .brand-mark {
   display: block;
   font-size: 19px;
