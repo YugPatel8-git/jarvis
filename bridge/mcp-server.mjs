@@ -18,8 +18,8 @@ const tool=(name,description,schema)=>server.tool(name,description,schema,async(
   if(name==='browser'&&v?.image)return {content:[{type:'text',text:'Screenshot of the current isolated Chrome tab.'},{type:'image',data:v.image,mimeType:v.mimeType??'image/jpeg'}]}
   return response(v)
 })
-tool('browser','Control an isolated local Chrome profile: open/navigate/search tabs, click ordinary selectors, scroll, read, or screenshot.',{
-  operation:z.enum(['open','navigate','search','youtube_search','tabs','close','close_all','next_tab','previous_tab','activate','click','type','scroll','read','screenshot']),
+tool('browser','Control isolated Chrome. After a model-driven search, prefer search_results for at most five title/URL/snippet records; use read for cleaned visible article text.',{
+  operation:z.enum(['open','navigate','search','youtube_search','search_results','tabs','close','close_all','next_tab','previous_tab','activate','click','type','scroll','read','screenshot']),
   url:z.string().optional(),query:z.string().optional(),tabId:z.string().optional(),selector:z.string().optional(),label:z.string().optional(),value:z.string().optional(),y:z.number().optional(),
 })
 tool('shell','Run a normal local executable with structured arguments, or a PowerShell script. The router blocks high-risk execution for approval.',{

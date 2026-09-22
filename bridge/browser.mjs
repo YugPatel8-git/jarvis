@@ -59,6 +59,24 @@ export async function browserAction(a) {
   const t=list.find((x)=>x.id===a.tabId)??list[0]; if(!t)throw new Error('No Chrome tab is available.')
   if(op==='close'||op==='activate'){const r=await fetch(`http://127.0.0.1:${PORT}/json/${op}/${encodeURIComponent(t.id)}`);return {[op+'d']:r.ok,id:t.id}}
   if(op==='scroll'){const y=Math.max(-5000,Math.min(5000,Number(a.y)||650));await cdp(t,'Runtime.evaluate',{expression:`scrollBy({top:${y},behavior:"smooth"})`});return {scrolled:y}}
+  if(op==='search_results'){
+    const expression=`(()=>{
+      const out=[],seen=new Set()
+      for(const a of document.querySelectorAll('a[href]')){
+        const title=(a.innerText||a.textContent||'').replace(/\\s+/g,' ').trim()
+        let href;try{href=new URL(a.href,location.href).href}catch{continue}
+        if(title.length<3||!/^https?:/.test(href)||seen.has(href))continue
+        const parsed=new URL(href), path=parsed.pathname
+        if(parsed.hostname===location.hostname&&(path==='/search'||path.startsWith('/search/')||path==='/results'||path.startsWith('/results/')))continue
+        const snippet=(a.closest('article,li,[data-testid],div')?.innerText||'').replace(/\\s+/g,' ').trim().slice(0,240)
+        seen.add(href);out.push({title:title.slice(0,160),url:href,snippet})
+        if(out.length===5)break
+      }
+      return out
+    })()`
+    const r=await cdp(t,'Runtime.evaluate',{expression,returnByValue:true})
+    return {results:r.result?.value??[]}
+  }
   if(op==='read'){
     const expression=`(()=>{
       const root=document.querySelector('article,main,[role="main"]')||document.body
