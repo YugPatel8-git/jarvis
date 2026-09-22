@@ -8,6 +8,7 @@ import {
 } from '../config'
 import * as kokoro from './kokoro'
 import { caps } from './capabilities'
+import { speakablePhrase, takeSpeechPhrases } from './speech-phrases'
 
 /**
  * Speech output.
@@ -18,8 +19,8 @@ import { caps } from './capabilities'
  * voice sounds better but costs a few hundred milliseconds per sentence, and in
  * conversation that gap is much more noticeable than the timbre.
  *
- * Either way, text is cut at sentence boundaries as it streams in and spoken a
- * sentence at a time, so JARVIS starts talking while Codex is still writing.
+ * Text is cut at stable clauses and sentences as it streams in, so JARVIS can
+ * start talking while Codex is still writing.
  *
  * The queue is an explicit array with a single pump rather than a promise
  * chain. A chain cannot be cut: cancelling mid-sentence left the chain's tail
@@ -28,7 +29,7 @@ import { caps } from './capabilities'
  */
 
 type Speaker = {
-  /** Feed streamed text in. Complete sentences are spoken as they appear. */
+  /** Feed streamed text in. Stable phrases are spoken as they appear. */
   push: (delta: string) => void
   /** Speak a phrase ahead of anything still queued. Used for filler like
    *  "Working on it, sir" while a tool runs. */
@@ -39,6 +40,7 @@ type Speaker = {
   cancel: () => void
   /** 0..1 output loudness for the visualiser. */
   level: () => number
+  markModelDelta: () => void
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +93,11 @@ export const diag = {
   lastStartLatencyMs: 0,
   /** Lowest queue-to-start latency observed in this page session. */
   bestStartLatencyMs: 0,
+  firstModelDeltaMs: 0,
+  firstPhraseMs: 0,
+  firstTtsStartMs: 0,
+  firstAudioReadyMs: 0,
+  firstAudibleMs: 0,
 }
 
 if (typeof window !== 'undefined') {
@@ -141,26 +148,6 @@ export function speakingNow(): string {
   const tail = Date.now() < recentUntil ? recent : ''
   return `${speaking} ${tail}`.trim()
 }
-
-// ---------------------------------------------------------------------------
-// Sentence boundaries
-// ---------------------------------------------------------------------------
-
-/** Sentence end, allowing a closing quote or bracket — curly ones included,
- *  since models emit typographic punctuation far more often than ASCII. */
-const SENTENCE_END = /([.!?]["'')\]”’]?\s)|(\n\n)/
-
-/** Full stops that are not sentence ends. Cutting on these puts an audible
- *  gap inside "Mr. Stark" and reads as a stutter. */
-const ABBREVIATION =
-  /(?:^|\s)(mr|mrs|ms|dr|prof|sr|jr|st|vs|etc|e\.g|i\.e|approx|inc|ltd|co|no|vol|fig|dept|est|min|max|hr|hrs|a\.m|p\.m|u\.s|u\.k|no)\.$/i
-
-/**
- * Nobody punctuates forever, but a model occasionally writes a long clause
- * with no terminator at all — and while it does, nothing is spoken. Past this
- * many characters, cut at the last word boundary and start talking.
- */
-const MAX_UNSPOKEN = 220
 
 // ---------------------------------------------------------------------------
 // Voice selection
@@ -255,6 +242,13 @@ export function currentVoiceName(): string {
   return pickVoice()?.name ?? 'default'
 }
 
+/** Start voice/model loading on page load; unlock output on the ignition gesture. */
+export function prewarmSpeech(unlockOutput = false): void {
+  pickVoice()
+  if (unlockOutput) outputContext()
+  if (TTS_ENGINE === 'kokoro') void kokoro.load()
+}
+
 /** Step to the next candidate — lets you audition voices on your own machine
  *  rather than trusting a ranking to be right about how they sound. */
 export function cycleVoice(): string {
@@ -336,16 +330,27 @@ function shape(text: string): string {
 type Item = {
   text: string
   queuedAt: number
-  /** Generation starts one sentence ahead, not all at once. */
+  model: boolean
+  /** Generation starts at most one phrase ahead, while playback is active. */
   audio?: Promise<string | null> | null
 }
 
 export function createSpeaker(): Speaker {
+  const turnStart = performance.now()
+  diag.firstModelDeltaMs = 0
+  diag.firstPhraseMs = 0
+  diag.firstTtsStartMs = 0
+  diag.firstAudioReadyMs = 0
+  diag.firstAudibleMs = 0
+  const mark = (field: 'firstModelDeltaMs' | 'firstPhraseMs' | 'firstTtsStartMs' | 'firstAudioReadyMs' | 'firstAudibleMs') => {
+    if (!diag[field]) diag[field] = Math.round(performance.now() - turnStart)
+  }
   const queue: Item[] = []
   let buffer = ''
   let cancelled = false
   let outLevel = 0
   let pumping = false
+  let playingAudio = false
 
   let currentAudio: HTMLAudioElement | null = null
   let nativeInFlight = false
@@ -359,25 +364,32 @@ export function createSpeaker(): Speaker {
 
   const enqueue = (sentence: string, priority = false) => {
     if (cancelled) return
+    if (!speakablePhrase(sentence)) return
     // Shape once here so both engines get the same text — stripped markdown,
     // and the comma before "sir" that buys the beat.
     const text = shape(sentence)
     if (!text) return
 
-    const item: Item = { text, queuedAt: performance.now() }
+    const item: Item = { text, queuedAt: performance.now(), model: !priority }
     if (priority) {
       // Genuinely ahead of the queue this time. The old `say()` appended to the
       // same chain and only appeared to preempt because it was called when the
       // queue happened to be empty.
       queue.unshift(item)
     } else {
+      mark('firstPhraseMs')
       queue.push(item)
     }
+    // If phrase one is already playing, prepare phrase two immediately.
+    // The pump still owns playback order, so there can be no overlap.
+    if (playingAudio && queue.length === 1) prime(item)
     void pump()
   }
 
   /** null means "no audio pipeline, use the system voice directly". */
-  function synthesise(text: string): Promise<string | null> | null {
+  function synthesise(item: Item): Promise<string | null> | null {
+    const { text } = item
+    if (item.model) mark('firstTtsStartMs')
     // Prefer the ElevenLabs voice whenever the bridge reports it is available —
     // for a demo the timbre is worth the round trip, and this is what makes the
     // premium path automatic with no flag to set. It falls back to the browser
@@ -390,11 +402,11 @@ export function createSpeaker(): Speaker {
       // ElevenLabs, which makes the one field naming the engine useless
       // exactly when you are trying to work out which engine is at fault.
       diag.engine = 'elevenlabs'
-      return fetchCloudAudio(text).catch(() => null)
+      return fetchCloudAudio(text).then((url) => { if (url && item.model) mark('firstAudioReadyMs'); return url }).catch(() => null)
     }
     if (TTS_ENGINE === 'kokoro' && !kokoro.isUnavailable()) {
       diag.engine = 'kokoro'
-      return kokoro.speak(text).catch(() => null)
+      return kokoro.speak(text).then((url) => { if (url && item.model) mark('firstAudioReadyMs'); return url }).catch(() => null)
     }
     diag.engine = 'system'
     return null
@@ -402,7 +414,13 @@ export function createSpeaker(): Speaker {
 
   /** Start generating an item's audio if it hasn't begun. */
   const prime = (item: Item | undefined) => {
-    if (item && item.audio === undefined) item.audio = synthesise(item.text)
+    if (item && item.audio === undefined) {
+      const audio = synthesise(item)
+      item.audio = audio?.then((url) => {
+        if (cancelled && url) URL.revokeObjectURL(url)
+        return cancelled ? null : url
+      }) ?? null
+    }
   }
 
   async function pump(): Promise<void> {
@@ -415,11 +433,6 @@ export function createSpeaker(): Speaker {
         if (!item) break
 
         prime(item)
-        // Exactly one sentence ahead. Priming the whole queue fires every
-        // request at once — four parallel cloud POSTs, or four concurrent
-        // generations against a single ONNX session.
-        prime(queue[0])
-
         await speakOne(item)
       }
     } finally {
@@ -436,11 +449,15 @@ export function createSpeaker(): Speaker {
       if (cancelled) return
       // A failed generation is not a failed turn — drop to the system voice.
       if (url) {
-        await playUrl(url, item.text, item.queuedAt)
+        playingAudio = true
+        prime(queue[0])
+        await playUrl(url, item.text, item.queuedAt, item.model)
         return
       }
 
-      const spoke = await speakNative(item.text, item.queuedAt)
+      playingAudio = true
+      prime(queue[0])
+      const spoke = await speakNative(item.text, item.queuedAt, item.model)
       if (spoke || cancelled) return
 
       // The OS voice produced no sound. That is not recoverable by retrying it,
@@ -457,14 +474,15 @@ export function createSpeaker(): Speaker {
       const rescue = await fetchCloudAudio(item.text).catch(() => null)
       if (rescue && !cancelled) {
         diag.rescued++
-        await playUrl(rescue, item.text, item.queuedAt)
+        await playUrl(rescue, item.text, item.queuedAt, item.model)
       }
     } finally {
+      playingAudio = false
       if (speaking === item.text) setSpeaking('')
     }
   }
 
-  const speakNative = (text: string, queuedAt: number) =>
+  const speakNative = (text: string, queuedAt: number, model: boolean) =>
     new Promise<boolean>((resolve) => {
       // Chrome's speechSynthesis wedges after cancel().
       //
@@ -526,6 +544,10 @@ export function createSpeaker(): Speaker {
       }
 
       u.onstart = () => {
+        if (model) {
+          mark('firstAudioReadyMs')
+          mark('firstAudibleMs')
+        }
         started = true
         diag.started++
         diag.lastStartLatencyMs = Math.round(performance.now() - queuedAt)
@@ -588,7 +610,7 @@ export function createSpeaker(): Speaker {
       speechSynthesis.speak(u)
     })
 
-  const playUrl = (url: string, text: string, queuedAt: number) =>
+  const playUrl = (url: string, text: string, queuedAt: number, model: boolean) =>
     new Promise<void>((resolve) => {
       const audio = new Audio(url)
       currentAudio = audio
@@ -641,6 +663,7 @@ export function createSpeaker(): Speaker {
       // SpeechSynthesisUtterance.onstart, and it is what makes the diagnostics
       // verdict — and the T self-test — tell the truth on the premium path.
       audio.onplaying = () => {
+        if (model) mark('firstAudibleMs')
         diag.started++
         diag.lastStartLatencyMs = Math.round(performance.now() - queuedAt)
         if (!diag.bestStartLatencyMs || diag.lastStartLatencyMs < diag.bestStartLatencyMs) diag.bestStartLatencyMs = diag.lastStartLatencyMs
@@ -673,38 +696,9 @@ export function createSpeaker(): Speaker {
     push(delta) {
       if (cancelled) return
       buffer += delta
-
-      // Drain every complete sentence sitting in the buffer.
-      for (;;) {
-        const m = SENTENCE_END.exec(buffer)
-        if (!m) break
-        const cut = m.index + m[0].length
-        const candidate = buffer.slice(0, cut)
-        // "Mr. Stark" is not two sentences. Leave the text in the buffer and
-        // wait for a boundary that actually ends something.
-        if (ABBREVIATION.test(candidate.trimEnd())) {
-          const rest = buffer.slice(cut)
-          if (!SENTENCE_END.test(rest)) break
-          // Re-scan from after this false boundary by folding it forward.
-          const next = SENTENCE_END.exec(rest)!
-          const wider = cut + next.index + next[0].length
-          enqueue(buffer.slice(0, wider))
-          buffer = buffer.slice(wider)
-          continue
-        }
-        enqueue(candidate)
-        buffer = buffer.slice(cut)
-      }
-
-      // Unpunctuated prose would otherwise sit here silently until the answer
-      // ended, defeating the whole point of streaming.
-      if (buffer.length > MAX_UNSPOKEN) {
-        const cut = buffer.lastIndexOf(' ', MAX_UNSPOKEN)
-        if (cut > 40) {
-          enqueue(buffer.slice(0, cut))
-          buffer = buffer.slice(cut)
-        }
-      }
+      const extracted = takeSpeechPhrases(buffer)
+      buffer = extracted.rest
+      for (const phrase of extracted.phrases) enqueue(phrase)
     },
     async end() {
       if (buffer.trim()) {
@@ -719,6 +713,9 @@ export function createSpeaker(): Speaker {
       if (cancelled) return
       cancelled = true
       buffer = ''
+      for (const item of queue) {
+        if (item.audio) void item.audio.then((url) => { if (url) URL.revokeObjectURL(url) })
+      }
       queue.length = 0
       // Keep the echo tail: the words already in the air still have to be
       // recognised and discarded, even though he has stopped adding to them.
@@ -742,6 +739,7 @@ export function createSpeaker(): Speaker {
       settleDrained()
     },
     level: () => outLevel,
+    markModelDelta: () => mark('firstModelDeltaMs'),
   }
 }
 

@@ -6,7 +6,7 @@ import { Ignition } from './ui/Ignition'
 import { Diagnostics } from './ui/Diagnostics'
 import { useStore } from './store'
 import { startVoice, type Voice, type VoiceMode } from './lib/voice'
-import { createSpeaker, cycleVoice, currentVoiceName } from './lib/tts'
+import { createSpeaker, cycleVoice, currentVoiceName, prewarmSpeech } from './lib/tts'
 import * as sfx from './lib/sfx'
 import * as music from './lib/music'
 import * as hands from './lib/hands'
@@ -14,7 +14,7 @@ import { listenForClap } from './lib/clap'
 import * as camera from './lib/camera'
 import * as kokoro from './lib/kokoro'
 import { TTS_ENGINE } from './config'
-import { forTool, attention } from './lib/fillers'
+import { attention } from './lib/fillers'
 import {
   ask,
   warm,
@@ -142,12 +142,22 @@ export default function App() {
 
     const turnId = newId()
     let started = false
-    let filled = false
+    let acknowledged = false
+    let toolSeen = false
+    const slowRequest = /\b(search|browse|research|check|inspect|find|open|read|analy[sz]e|compare|summari[sz]e|run|build|test|edit|change|create|write|fix)\b/i.test(said)
+    const ackTimer = setTimeout(() => {
+      if (!stale() && !started && !acknowledged && (toolSeen || slowRequest)) {
+        acknowledged = true
+        spk.say(toolSeen ? 'Checking that now.' : 'Give me a second.')
+      }
+    }, 550)
 
     try {
       await ask(said, history.current, {
         onText: (delta) => {
           if (stale()) return
+          spk.markModelDelta()
+          clearTimeout(ackTimer)
           if (!started) {
             started = true
             store.getState().setPhase('speaking')
@@ -170,16 +180,9 @@ export default function App() {
           store.getState().setActiveTool(name)
           sfx.play('tool')
           music.working(true)
-          // Say something the moment work starts — a tool can take ten seconds
-          // and silence that long reads as a crash. Once per turn only; a
-          // chain of five tools shouldn't produce five apologies.
-          if (!filled && !started) {
-            filled = true
-            spk.say(forTool(name))
-          }
-        },
-        onAck: (text) => {
-          if (!stale() && !started && text) spk.say(text)
+          // Tool activity makes a delayed local acknowledgement eligible.
+          // The timer still skips it if real text starts first.
+          toolSeen = true
         },
       })
 
@@ -196,6 +199,7 @@ export default function App() {
         .getState()
         .setError(err instanceof Error ? err.message : 'Something went wrong.')
     } finally {
+      clearTimeout(ackTimer)
       if (!stale()) {
         speaker.current = null
         sfx.duck(false)
@@ -342,6 +346,7 @@ export default function App() {
 
     // Must happen inside the click handler — browsers won't start an
     // AudioContext or speech synthesis without a user gesture.
+    prewarmSpeech(true)
     await sfx.unlockAudio()
     sfx.play('boot')
     // The score. Must be started from inside this click handler for the same
@@ -513,6 +518,12 @@ export default function App() {
   }
 
   // -- clap to start --------------------------------------------------------
+
+  useEffect(() => {
+    // Start voice discovery and the optional local model as soon as the face
+    // loads. Output unlock still waits for the ignition gesture.
+    prewarmSpeech()
+  }, [])
 
   /**
    * A clap brings him up, as an alternative to the button.

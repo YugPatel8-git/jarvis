@@ -38,9 +38,9 @@ const wss=new WebSocketServer({noServer:true,maxPayload:2*1024*1024})
 let frontend=null, seq=0
 const waiting=new Map()
 function send(msg){if(frontend?.readyState===WebSocket.OPEN)frontend.send(JSON.stringify(msg))}
-let askId=null, ackTimer=null
+let askId=null
 const coreTimings={}
-const conversation=new CodexAppServerConversation({cwd:process.cwd(),routerToken:TOKEN,onText:(delta)=>{if(ackTimer){clearTimeout(ackTimer);ackTimer=null}send({type:'text',delta,ask:askId})},onTool:(name)=>send({type:'tool',name,ask:askId}),onTiming:(metric,ms)=>{const value=Number(ms.toFixed(2));coreTimings[metric]=value;send({type:'timing',metric,ms:value,ask:askId})},onState:(state)=>send({type:'core',state,servers:[state==='ready'?'ai-core-ready':state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']})})
+const conversation=new CodexAppServerConversation({cwd:process.cwd(),routerToken:TOKEN,onText:(delta)=>send({type:'text',delta,ask:askId}),onTool:(name)=>send({type:'tool',name,ask:askId}),onTiming:(metric,ms)=>{const value=Number(ms.toFixed(2));coreTimings[metric]=value;send({type:'timing',metric,ms:value,ask:askId})},onState:(state)=>send({type:'core',state,servers:[state==='ready'?'ai-core-ready':state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']})})
 void conversation.warm().catch((e)=>console.warn(`[jarvis] app-server prewarm failed; exec fallback remains available: ${e.message}`))
 function request(type,args,ms=120000){return new Promise((ok,no)=>{if(!frontend)return no(new Error('JARVIS interface is not connected.'));const id=`r${++seq}`,timer=setTimeout(()=>{waiting.delete(id);no(new Error(`${type} request timed out`))},ms);waiting.set(id,{ok,no,timer});send({type,id,...args})})}
 const route=createRouter({
@@ -79,8 +79,6 @@ wss.on('connection',(socket,req)=>{
       return
     }
     send({type:'route',engine:'codex',ask:askId})
-    if(ackTimer)clearTimeout(ackTimer)
-    const ackAsk=askId;ackTimer=setTimeout(()=>{ackTimer=null;if(conversation.busy&&askId===ackAsk)send({type:'ack',text:'On it.',ask:ackAsk})},450)
     void conversation.ask(m.text).then(text=>send({type:'done',text,ask:askId})).catch(e=>send({type:'error',message:String(e?.message??e),ask:askId}))
   })
   socket.on('close',()=>{if(frontend===socket)frontend=null;if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
