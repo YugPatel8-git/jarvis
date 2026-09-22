@@ -60,6 +60,12 @@ test('keeps HUD input separate from speech normalization', () => {
   assert.equal(display, '**Build successful**')
 })
 
+test('keeps ordinary profanity and quoted slang uncensored', () => {
+  assert.equal(toSpeechText('That was a stupid mistake.'), 'That was a stupid mistake.')
+  assert.equal(toSpeechText('That was a damn stupid mistake.'), 'That was a damn stupid mistake.')
+  assert.equal(toSpeechText('The user called it "bloody awkward".'), 'The user called it "bloody awkward".')
+})
+
 test('streamed technical text reaches the normalizer without changing display text', () => {
   const display = 'The file is at C:\\Users\\yugkp\\Downloads\\jarvis\\src\\App.tsx. More details'
   const { phrases, rest } = takeSpeechPhrases(display)

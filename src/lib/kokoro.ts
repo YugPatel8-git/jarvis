@@ -59,6 +59,15 @@ function resolveVoice(): string {
 }
 
 const voice = resolveVoice()
+let lastVoice = voice
+export const activeVoice = () => lastVoice
+
+/** Audition the installed model voices with the existing V preview key. */
+export function cycleVoice(): string {
+  const next = VOICES[(VOICES.indexOf(lastVoice as typeof VOICES[number]) + 1) % VOICES.length]
+  lastVoice = next
+  return next
+}
 
 /**
  * Generation failures latch after this many in a row. One is worth retrying —
@@ -113,31 +122,26 @@ export async function load(): Promise<Kokoro | null> {
 export async function speak(text: string): Promise<string | null> {
   const tts = await load()
   if (!tts) return null
-  try {
-    const audio = await tts.generate(text, {
-      voice,
-      // Slightly under natural pace — the character is never hurried, and the
-      // steadiness is most of the characterisation.
-      speed: 0.95,
-    })
-    failures = 0
-    return URL.createObjectURL(audio.toBlob())
-  } catch (err) {
-    // Surfaced rather than swallowed: a silent null here just looks like the
-    // voice quietly reverting to the system one with no explanation.
-    console.error('[jarvis] kokoro generation failed:', err)
-    lastError = String((err as Error)?.message ?? err)
-    failures++
-    if (failures >= MAX_FAILURES) {
-      // Nothing else sets this on the generation path, so without it tts.ts
-      // keeps routing every sentence here and every sentence keeps throwing.
-      failed = true
-      console.warn(
-        `[jarvis] kokoro failed ${failures} times running — the system voice from here on.`,
-      )
+  // A voice-specific generation failure can be recovered locally before
+  // dropping to the system voice. The second attempt is only on failure.
+  const fallbackVoice = lastVoice === 'bm_fable' ? 'bm_george' : 'bm_fable'
+  for (const candidate of [lastVoice, fallbackVoice]) {
+    try {
+      const audio = await tts.generate(text, { voice: candidate, speed: 0.95 })
+      lastVoice = candidate
+      failures = 0
+      return URL.createObjectURL(audio.toBlob())
+    } catch (err) {
+      console.warn(`[jarvis] kokoro ${candidate} generation failed:`, err)
+      lastError = String((err as Error)?.message ?? err)
     }
-    return null
   }
+  failures++
+  if (failures >= MAX_FAILURES) {
+    failed = true
+    console.warn('[jarvis] kokoro unavailable after repeated failures; using the system voice')
+  }
+  return null
 }
 
 /** Voice ids this build of the model actually carries. */

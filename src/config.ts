@@ -3,12 +3,6 @@ function str(raw: unknown): string | undefined {
   const value = typeof raw === 'string' ? raw.trim() : ''
   return value || undefined
 }
-function flag(raw: unknown, fallback: boolean): boolean {
-  const value = str(raw)?.toLowerCase()
-  if (value === 'true' || value === '1') return true
-  if (value === 'false' || value === '0') return false
-  return fallback
-}
 function choice<T extends string>(raw: unknown, allowed: readonly T[], fallback: T): T {
   const value = str(raw)
   return value && (allowed as readonly string[]).includes(value) ? value as T : fallback
@@ -17,9 +11,8 @@ function choice<T extends string>(raw: unknown, allowed: readonly T[], fallback:
 export const BACKEND: 'bridge' | 'direct' = 'bridge'
 export const BRIDGE_WS_URL = str(import.meta.env.VITE_BRIDGE_URL) ?? 'ws://127.0.0.1:8787'
 export const BRIDGE_HTTP_URL = BRIDGE_WS_URL.replace(/^ws/, 'http')
-export const USE_ELEVENLABS = flag(import.meta.env.VITE_USE_ELEVENLABS, false)
 export const TTS_ENGINE: 'kokoro' | 'system' = choice(
-  import.meta.env.VITE_TTS_ENGINE, ['kokoro', 'system'] as const, 'system',
+  import.meta.env.VITE_TTS_ENGINE, ['kokoro', 'system'] as const, 'kokoro',
 )
 export const KOKORO_VOICE = choice(
   import.meta.env.VITE_KOKORO_VOICE,

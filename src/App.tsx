@@ -411,6 +411,7 @@ export default function App() {
         const p = kokoro.loadProgress()
         if (kokoro.isReady() || kokoro.isUnavailable()) {
           store.getState().setReadinessNote('')
+          store.getState().setVoice(currentVoiceName())
           if (voicePoll.current) clearInterval(voicePoll.current)
           voicePoll.current = null
         } else if (p > 0 && p < 1) {
@@ -449,8 +450,8 @@ export default function App() {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
 
-      // V auditions the next British voice installed on this machine. Which
-      // ones exist varies per Mac, so hearing them beats trusting a ranking.
+      // V previews the next local voice. Hearing it on the actual speakers
+      // is more useful than trusting a voice name or ranking.
       // Bare V only — ⌘V and ⌃V are paste, and swallowing those was rude.
       if (
         e.key === 'v' &&
@@ -511,7 +512,7 @@ export default function App() {
         void t.end().then(() => {
           const d = (window as unknown as Record<string, Record<string, unknown>>).__tts
           console.info('[jarvis] audio test →', d)
-          if (d && d.started === 0 && d.rescued === 0) {
+          if (d && d.started === 0) {
             store.getState().setError(
               `No sound produced. engine=${d.engine} voice=${d.voice} error=${d.lastError || 'none'}`,
             )

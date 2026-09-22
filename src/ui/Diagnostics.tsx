@@ -37,8 +37,6 @@ type TtsDiag = {
   started: number
   failures: number
   lastError: string
-  nativeBroken: boolean
-  rescued: number
   voice: string
   lastText: string
 }
@@ -87,7 +85,7 @@ export function Diagnostics() {
   // The two verdicts worth stating outright, rather than making you infer them
   // from the numbers underneath.
   const earsOk = Boolean(v.running) && (v.accepted ?? 0) > 0
-  const mouthOk = (t.started ?? 0) > 0 || (t.rescued ?? 0) > 0
+  const mouthOk = (t.started ?? 0) > 0
 
   return (
     <div className="diag" aria-live="polite">
@@ -120,10 +118,9 @@ export function Diagnostics() {
       <div className="diag-sec">SPEAKING · press T to test</div>
       <Row k="engine" v={String(t.engine ?? 'system')} />
       <Row k="voice" v={String(t.voice || '—')} />
-      <Row k="handed to OS" v={String(t.spoken ?? 0)} />
+      <Row k="handed to voice" v={String(t.spoken ?? 0)} />
       <Row k="actually spoke" v={String(t.started ?? 0)} bad={(t.started ?? 0) === 0} />
       <Row k="failures" v={String(t.failures ?? 0)} bad={(t.failures ?? 0) > 0} />
-      <Row k="cloud rescues" v={String(t.rescued ?? 0)} />
       <Row k="error" v={t.lastError || '—'} bad={Boolean(t.lastError)} />
     </div>
   )

@@ -1,24 +1,14 @@
-import {
-  env,
-  USE_ELEVENLABS,
-  BACKEND,
-  TTS_ENGINE,
-  KOKORO_VOICE,
-  BRIDGE_HTTP_URL,
-} from '../config'
+import { TTS_ENGINE } from '../config'
 import * as kokoro from './kokoro'
-import { caps } from './capabilities'
 import { takeSpeechPhrases } from './speech-phrases'
 import { toSpeechText, type SpeechContext } from './speech-text'
 
 /**
  * Speech output.
  *
- * The browser's own speechSynthesis is the default because it is by far the
- * fastest thing available: it runs on-device, so there is no request, no
- * generation wait and no download — speech starts on the next frame. A cloud
- * voice sounds better but costs a few hundred milliseconds per sentence, and in
- * conversation that gap is much more noticeable than the timbre.
+ * Kokoro generates speech locally and the browser's speechSynthesis remains
+ * the quick fallback if the model is unavailable. No speech text is sent to a
+ * remote voice service.
  *
  * Text is cut at stable clauses and sentences as it streams in, so JARVIS can
  * start talking while Codex is still writing.
@@ -65,7 +55,7 @@ const ECHO_TAIL_MS = 1800
  * indistinguishable. This tells them apart at a glance.
  */
 export const diag = {
-  engine: 'system' as 'system' | 'kokoro' | 'elevenlabs',
+  engine: 'system' as 'system' | 'kokoro',
   /** Utterances handed to an engine — the OS voice or an audio element. */
   spoken: 0,
   /**
@@ -84,10 +74,6 @@ export const diag = {
   failures: 0,
   /** Last SpeechSynthesis error code, e.g. 'synthesis-failed'. */
   lastError: '',
-  /** Set once the OS voice has proved unusable; the cloud voice takes over. */
-  nativeBroken: false,
-  /** Sentences rescued by the bridge's ElevenLabs proxy. */
-  rescued: 0,
   voice: '',
   lastText: '',
   /** Queue-to-audible-start latency for the most recent spoken chunk. */
@@ -104,16 +90,6 @@ export const diag = {
 if (typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__tts = diag
 }
-
-/**
- * Once the OS voice has failed, stop asking it.
- *
- * A broken system voice is not a transient condition — it fails identically on
- * every sentence — so retrying it per line would make the whole answer stutter
- * through the same dead path. After the first real failure everything routes to
- * the bridge's speech proxy instead, which holds an ElevenLabs key already.
- */
-let nativeBroken = false
 
 let speakingAt = 0
 
@@ -236,9 +212,8 @@ function pickVoice(): SpeechSynthesisVoice | null {
  *  always naming a speechSynthesis voice that a cloud or neural engine has
  *  quietly replaced. */
 export function currentVoiceName(): string {
-  if (USE_ELEVENLABS || caps().tts) return 'ElevenLabs'
-  if (TTS_ENGINE === 'kokoro' && !kokoro.isUnavailable()) {
-    return KOKORO_VOICE.replace(/^bm_/, '')
+  if (TTS_ENGINE === 'kokoro' && kokoro.isReady()) {
+    return kokoro.activeVoice().replace(/^bm_/, '')
   }
   return pickVoice()?.name ?? 'default'
 }
@@ -253,6 +228,9 @@ export function prewarmSpeech(unlockOutput = false): void {
 /** Step to the next candidate — lets you audition voices on your own machine
  *  rather than trusting a ranking to be right about how they sound. */
 export function cycleVoice(): string {
+  if (TTS_ENGINE === 'kokoro' && kokoro.isReady()) {
+    return kokoro.cycleVoice().replace(/^bm_/, '')
+  }
   const list = candidateVoices()
   if (!list.length) return 'default'
   const now = pickVoice()
@@ -338,6 +316,9 @@ type Item = {
 
 export function createSpeaker(context: SpeechContext = {}): Speaker {
   const turnStart = performance.now()
+  // Keep one timbre per answer; a model finishing its first download midway
+  // through a sentence should only take over on the following turn.
+  const useKokoro = TTS_ENGINE === 'kokoro' && kokoro.isReady()
   diag.firstModelDeltaMs = 0
   diag.firstPhraseMs = 0
   diag.firstTtsStartMs = 0
@@ -392,21 +373,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   function synthesise(item: Item): Promise<string | null> | null {
     const { text } = item
     if (item.model) mark('firstTtsStartMs')
-    // Prefer the ElevenLabs voice whenever the bridge reports it is available —
-    // for a demo the timbre is worth the round trip, and this is what makes the
-    // premium path automatic with no flag to set. It falls back to the browser
-    // voice on any failure, so a student without a key still hears him speak.
-    // `nativeBroken` latches on once the system voice has proved unusable.
-    if (USE_ELEVENLABS || caps().tts || nativeBroken) {
-      // Recorded at the moment the tier is chosen rather than only when the
-      // native voice latches over. Without this the panel reported 'system'
-      // for a session that had spoken every one of its sentences through
-      // ElevenLabs, which makes the one field naming the engine useless
-      // exactly when you are trying to work out which engine is at fault.
-      diag.engine = 'elevenlabs'
-      return fetchCloudAudio(text).then((url) => { if (url && item.model) mark('firstAudioReadyMs'); return url }).catch(() => null)
-    }
-    if (TTS_ENGINE === 'kokoro' && !kokoro.isUnavailable()) {
+    if (useKokoro && !kokoro.isUnavailable()) {
       diag.engine = 'kokoro'
       return kokoro.speak(text).then((url) => { if (url && item.model) mark('firstAudioReadyMs'); return url }).catch(() => null)
     }
@@ -459,25 +426,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
 
       playingAudio = true
       prime(queue[0])
-      const spoke = await speakNative(item.text, item.queuedAt, item.model)
-      if (spoke || cancelled) return
-
-      // The OS voice produced no sound. That is not recoverable by retrying it,
-      // so latch it off and rescue this sentence through the bridge's speech
-      // proxy — which already holds an ElevenLabs key borrowed from the MCP
-      // config. Losing the better timbre is a far smaller failure than a
-      // assistant that answers in silence.
-      if (!nativeBroken) {
-        nativeBroken = true
-        diag.nativeBroken = true
-        diag.engine = 'elevenlabs'
-        console.warn('[jarvis] system voice is not producing sound — using the bridge speech proxy from here on')
-      }
-      const rescue = await fetchCloudAudio(item.text).catch(() => null)
-      if (rescue && !cancelled) {
-        diag.rescued++
-        await playUrl(rescue, item.text, item.queuedAt, item.model)
-      }
+      await speakNative(item.text, item.queuedAt, item.model)
     } finally {
       playingAudio = false
       if (speaking === item.text) setSpeaking('')
@@ -599,7 +548,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         }
         watchdog = setTimeout(() => {
           if (done || started) return
-          console.error('[jarvis] speech engine is not responding — switching to the cloud voice')
+          console.error('[jarvis] system speech engine is not responding')
           diag.failures++
           diag.lastError = diag.lastError || 'no-start'
           finish()
@@ -616,13 +565,10 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
     new Promise<void>((resolve) => {
       const audio = new Audio(url)
       currentAudio = audio
-      // The generated path is an engine speaking just as much as the OS voice
-      // is, so it keeps the same books. `spoken` counts the hand-off, `started`
-      // is only incremented once the element reports it is actually playing —
-      // see the onplaying handler below.
+      // Count playback only when the element actually starts.
       diag.spoken++
       diag.lastText = text.slice(0, 60)
-      diag.voice = diag.engine === 'kokoro' ? KOKORO_VOICE : 'ElevenLabs'
+      diag.voice = kokoro.activeVoice()
 
       let read: (() => number) | null = null
       const ctx = outputContext()
@@ -661,7 +607,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (currentAudio === audio) currentAudio = null
         resolve()
       }
-      // Sound is genuinely coming out. This is the cloud/neural counterpart of
+      // Sound is genuinely coming out. This is the neural counterpart of
       // SpeechSynthesisUtterance.onstart, and it is what makes the diagnostics
       // verdict — and the T self-test — tell the truth on the premium path.
       audio.onplaying = () => {
@@ -744,51 +690,4 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
     level: () => outLevel,
     markModelDelta: () => mark('firstModelDeltaMs'),
   }
-}
-
-/** Only used when USE_ELEVENLABS is on. Bridge proxy first (it already holds
- *  the key), then a direct key, then null to fall back to the native voice. */
-async function fetchCloudAudio(text: string): Promise<string | null> {
-  if (BACKEND === 'bridge') {
-    try {
-      const res = await fetch(`${BRIDGE_HTTP_URL}/tts`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text }),
-      })
-      if (res.ok) return URL.createObjectURL(await res.blob())
-    } catch {
-      /* fall through */
-    }
-  }
-
-  if (env.elevenKey) {
-    try {
-      const res = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${env.elevenVoiceId}/stream` +
-          `?output_format=mp3_22050_32&optimize_streaming_latency=3`,
-        {
-          method: 'POST',
-          headers: {
-            'xi-api-key': env.elevenKey,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            text,
-            model_id: 'eleven_flash_v2_5',
-            voice_settings: {
-              stability: 0.4,
-              similarity_boost: 0.75,
-              speed: 1.05,
-            },
-          }),
-        },
-      )
-      if (res.ok) return URL.createObjectURL(await res.blob())
-    } catch {
-      /* fall through */
-    }
-  }
-
-  return null
 }
