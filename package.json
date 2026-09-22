@@ -13,6 +13,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "benchmark:latency": "node scripts/benchmark-latency.mjs",
     "preview": "vite preview",
     "bridge": "node bridge/server.mjs",
     "setup": "node scripts/setup.mjs"
