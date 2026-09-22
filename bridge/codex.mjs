@@ -4,6 +4,10 @@ import process from 'node:process'
 
 const TURN_TIMEOUT_MS = Number(process.env.JARVIS_TURN_TIMEOUT_MS ?? 120_000)
 const MODEL = process.env.JARVIS_CODEX_MODEL?.trim() || null
+const MAX_SESSION_TURNS = Number(process.env.JARVIS_SESSION_TURNS ?? 24)
+const MAX_SESSION_CHARS = Number(process.env.JARVIS_SESSION_CHARS ?? 40_000)
+const RECENT_TURNS = 6
+const RECENT_CHARS = 6_000
 
 const PERSONA = `You are JARVIS. You are speaking out loud to one person.
 
@@ -50,11 +54,20 @@ export class CodexConversation {
     this.sessionId = null
     this.child = null
     this.cancelled = false
+    this.turns = 0
+    this.contextChars = 0
+    this.recent = []
   }
 
   async ask(prompt) {
     if (this.child) throw new Error('Codex is already answering')
     this.cancelled = false
+    if(this.sessionId&&(this.turns>=MAX_SESSION_TURNS||this.contextChars+prompt.length>MAX_SESSION_CHARS)){
+      this.sessionId=null
+      this.turns=0
+      this.contextChars=0
+    }
+    const resuming=Boolean(this.sessionId)
 
     const mcpFile = new URL('./mcp-server.mjs', import.meta.url)
     const common = [
@@ -68,7 +81,7 @@ export class CodexConversation {
       '-c', 'features.plugins=false',
       'exec',
     ]
-    const mode = this.sessionId
+    const mode = resuming
       ? ['resume', '--ignore-user-config', '--ignore-rules', '--json', this.sessionId, '-']
       : ['--ignore-user-config', '--ignore-rules', '--json', '--cd', this.cwd, '-']
     if (MODEL) mode.splice(mode.length - 1, 0, '--model', MODEL)
@@ -89,7 +102,10 @@ export class CodexConversation {
     })
     this.child = child
 
-    const input = this.sessionId ? prompt : `${PERSONA}\n\nUser: ${prompt}`
+    const continuity=this.recent.length
+      ? '\n\nBounded recent context from the prior session; treat it as potentially stale:\n'+this.recent.map(x=>`User: ${x.prompt}\nJARVIS: ${x.answer}`).join('\n').slice(-RECENT_CHARS)
+      : ''
+    const input = resuming ? prompt : `${PERSONA}${continuity}\n\nUser: ${prompt}`
     child.stdin.end(input, 'utf8')
 
     let answer = ''
@@ -143,7 +159,12 @@ export class CodexConversation {
           const detail = stderr.trim() || parseError?.message || `exit code ${code}`
           return reject(new Error(`Codex CLI failed: ${detail}`))
         }
-        resolve(answer.trim())
+        const final=answer.trim()
+        this.turns+=1
+        this.contextChars+=prompt.length+final.length
+        this.recent.push({prompt:prompt.slice(0,1000),answer:final.slice(0,1200)})
+        this.recent=this.recent.slice(-RECENT_TURNS)
+        resolve(final)
       })
     })
   }

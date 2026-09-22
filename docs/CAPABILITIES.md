@@ -32,3 +32,23 @@ written to disk.
 by default. External MCP passthrough remains disabled because a direct
 third-party MCP connection would bypass this router; integrations need a
 mediated adapter before they can be enabled.
+
+## Daily-use efficiency
+
+Deterministic requests such as opening Chrome, YouTube, Downloads or VS Code;
+Google and YouTube searches; basic tab/scroll controls; known development
+commands; and folder creation are matched locally. They still use the permission
+router and audit log, but make zero Codex calls. Reasoning, summarization,
+generation, ambiguous requests, and page understanding continue through Codex.
+
+Codex sessions resume by ID and rotate after 24 model turns or roughly 40,000
+characters. A rotation carries only six bounded recent exchanges; the full
+browser transcript is never resent. Browser reads strip executable and layout
+content, deduplicate visible lines, and cap model-bound text at 18,000
+characters. Shell output removes ANSI/progress noise and remains capped at 64
+KiB.
+
+The remaining npm audit finding is a high-severity advisory in the transitive
+`sharp/libvips` path used by optional Kokoro speech. npm reports no available
+fix. The project intentionally does not approve blocked lifecycle scripts or
+force a risky upgrade merely to suppress this advisory.
