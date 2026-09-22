@@ -145,7 +145,7 @@ export default function App() {
     let started = false
     let acknowledged = false
     let toolSeen = false
-    const slowRequest = /\b(search|browse|research|check|inspect|find|open|read|analy[sz]e|compare|summari[sz]e|run|build|test|edit|change|create|write|fix)\b/i.test(said)
+    const slowRequest = /\b(search|browse|research|check|inspect|find|open|read|analy[sz]e|compare|summari[sz]e|run|build|test|edit|change|create|write|fix|webpage|website|weather|latest|online)\b/i.test(said)
     const ackTimer = setTimeout(() => {
       if (!stale() && !started && !acknowledged && (toolSeen || slowRequest)) {
         acknowledged = true

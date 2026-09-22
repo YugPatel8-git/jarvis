@@ -12,6 +12,8 @@ const { takeSpeechPhrases } = await import(`data:text/javascript,${encodeURIComp
 
 const cases = [
   ['Compiling...', ''],
+  ['Tokyo.', 'Tokyo.'],
+  ['Recursion is when a function calls itself until it reaches a base case.', 'Recursion is when a function calls itself until it reaches a base case.'],
   ['npm run build exited with code 0', 'The build finished successfully.'],
   ['C:\\Users\\yugkp\\Downloads\\jarvis\\src\\App.tsx', 'App.tsx in the source folder.'],
   ['https://github.com/openai/codex', 'The OpenAI Codex GitHub page.'],
@@ -20,12 +22,15 @@ const cases = [
   ['5.4s', 'About five point four seconds.'],
   ['JARVIS_ALLOW_WRITES=1', 'Write access is enabled.'],
   ['Process exited with code 1', 'The command failed.'],
+  ['TypeError at src/App.tsx:184:22', "There's an error in App.tsx."],
   ['TypeError: Cannot read properties of undefined\nat App.tsx:184:22', "There's an error in App.tsx."],
   ['npm run build', "I'll run the build."],
   ['git status', "I'll check the Git status."],
   ['npm install', "I'll install the project dependencies."],
   ['npx tsc --noEmit', "I'll run the command."],
   ['Task completed successfully', 'Done.'],
+  ['Checking that now.', 'Checking that now.'],
+  ['**Done**', 'Done.'],
   ['80%', 'Eighty percent.'],
   ['$25', 'Twenty-five dollars.'],
   ['It took 5.4s in 2026.', 'It took about five point four seconds in twenty twenty-six.'],
@@ -36,7 +41,7 @@ test('normalizes technical display text for speech', () => {
 })
 
 test('suppresses internal status and raw diagnostics', () => {
-  for (const display of ['Executing', 'Running tool', 'Calling MCP', 'stdout: hello', 'stderr: error', 'Exit code 0', 'Agent message delta', 'route: codex', 'mcp__server__tool', '{"ok":true}', '| --- | --- |']) {
+  for (const display of ['Executing', 'Running tool', 'Calling MCP', 'stdout: hello', 'stderr: error', 'Exit code 0', 'Agent message delta', 'route: codex', 'mcp__server__tool', '{"ok":true}', '| --- | --- |', 'OPENAI_API_KEY=hidden', 'Bearer abcdefghijklmnop', 'C:\\Users\\x\\.codex\\auth.json']) {
     assert.equal(toSpeechText(display), '', display)
   }
 })

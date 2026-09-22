@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import process from 'node:process'
+import { performance } from 'node:perf_hooks'
 import { WebSocket } from 'ws'
 
 const PORT = Number(process.env.JARVIS_CHROME_PORT ?? 9223)
@@ -36,6 +37,7 @@ async function cdp(target,method,params={}) {
 }
 function url(raw){const u=new URL(String(raw));if(!['http:','https:'].includes(u.protocol))throw new Error('Only http(s) navigation is allowed.');return u.href}
 export async function browserAction(a) {
+  const operationStarted=performance.now()
   let op=a.operation
   if(['open','navigate','search','youtube_search'].includes(op)){
     let dest=a.url
@@ -79,24 +81,32 @@ export async function browserAction(a) {
   }
   if(op==='read'){
     const expression=`(()=>{
+      const began=performance.now()
       const root=document.querySelector('article,main,[role="main"]')||document.body
-      if(!root)return ''
+      if(!root)return {text:'',extractionMs:0,cleanupMs:0}
       const skip='script,style,noscript,template,svg,canvas,nav,header,footer,aside,form,[hidden],[aria-hidden="true"],[class*="advert"],[class*="cookie"],[class*="popup"],[class*="modal"]'
       const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),seen=new Set(),lines=[]
+      let cleanupMs=0
       while(walker.nextNode()){
         const parent=walker.currentNode.parentElement
         if(!parent||parent.closest(skip))continue
         const style=getComputedStyle(parent)
         if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0||!parent.getClientRects().length)continue
+        const cleanAt=performance.now()
         const line=(walker.currentNode.nodeValue||'').replace(/\\s+/g,' ').trim()
+        cleanupMs+=performance.now()-cleanAt
         if(line.length<2||seen.has(line))continue
         seen.add(line);lines.push(line)
         if(lines.join('\\n').length>=18000)break
       }
-      return lines.join('\\n').slice(0,18000)
+      const cleanAt=performance.now(),text=lines.join('\\n').slice(0,18000)
+      cleanupMs+=performance.now()-cleanAt
+      return {text,extractionMs:performance.now()-began-cleanupMs,cleanupMs}
     })()`
+    const cdpStarted=performance.now()
     const r=await cdp(t,'Runtime.evaluate',{expression,returnByValue:true})
-    return {title:t.title,url:t.url,text:r.result?.value??''}
+    const value=r.result?.value??{text:'',extractionMs:0,cleanupMs:0}
+    return {title:t.title,url:t.url,text:value.text,timings:{browserToolMs:performance.now()-operationStarted,roundTripMs:performance.now()-cdpStarted,extractionMs:value.extractionMs,cleanupMs:value.cleanupMs}}
   }
   if(op==='click'){const sel=JSON.stringify(String(a.selector??''));const r=await cdp(t,'Runtime.evaluate',{expression:`(()=>{const e=document.querySelector(${sel});if(!e)return "not found";e.click();return "clicked"})()`,returnByValue:true});return {result:r.result?.value}}
   if(op==='type'){const sel=JSON.stringify(String(a.selector??'')),val=JSON.stringify(String(a.value??''));const r=await cdp(t,'Runtime.evaluate',{expression:`(()=>{const e=document.querySelector(${sel});if(!e)return "not found";e.focus();e.value=${val};e.dispatchEvent(new Event("input",{bubbles:true}));e.dispatchEvent(new Event("change",{bubbles:true}));return "entered"})()`,returnByValue:true});return {result:r.result?.value}}

@@ -40,13 +40,13 @@ const waiting=new Map()
 function send(msg){if(frontend?.readyState===WebSocket.OPEN)frontend.send(JSON.stringify(msg))}
 let askId=null
 const coreTimings={}
-const conversation=new CodexAppServerConversation({cwd:process.cwd(),routerToken:TOKEN,onText:(delta)=>send({type:'text',delta,ask:askId}),onTool:(name)=>send({type:'tool',name,ask:askId}),onTiming:(metric,ms)=>{const value=Number(ms.toFixed(2));coreTimings[metric]=value;send({type:'timing',metric,ms:value,ask:askId})},onState:(state)=>send({type:'core',state,servers:[state==='ready'?'ai-core-ready':state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']})})
+const conversation=new CodexAppServerConversation({cwd:process.cwd(),routerToken:TOKEN,onText:(delta)=>send({type:'text',delta,ask:askId}),onTool:(name)=>send({type:'tool',name,ask:askId}),onTiming:(metric,ms)=>{const value=Number(ms.toFixed(2));coreTimings[metric]=value;send({type:'timing',metric,ms:value,ask:askId})},onRouting:({model,effort})=>send({type:'routing',model,effort,ask:askId}),onState:(state)=>send({type:'core',state,servers:[state==='ready'?'ai-core-ready':state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']})})
 void conversation.warm().catch((e)=>console.warn(`[jarvis] app-server prewarm failed; exec fallback remains available: ${e.message}`))
 function request(type,args,ms=120000){return new Promise((ok,no)=>{if(!frontend)return no(new Error('JARVIS interface is not connected.'));const id=`r${++seq}`,timer=setTimeout(()=>{waiting.delete(id);no(new Error(`${type} request timed out`))},ms);waiting.set(id,{ok,no,timer});send({type,id,...args})})}
 const route=createRouter({
   requestApproval:(p)=>request('approval',p).then(x=>Boolean(x.approved)),
   request,
-  emit:(type,payload)=>send({type,...payload}),
+  emit:(type,payload)=>send({type,...payload,...(type==='tool-timing'?{ask:askId}:{})}),
 })
 server.on('upgrade',(req,socket,head)=>{
   const path=(req.url??'/').split('?')[0], tool=path==='/tools'

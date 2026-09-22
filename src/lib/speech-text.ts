@@ -61,6 +61,7 @@ export function toSpeechText(displayText: string, context: SpeechContext = {}): 
   if (/^(?:executing command|processing your request|running tool|calling mcp|reading filesystem)\b/i.test(original)) return ''
   if (/^(?:stdout|stderr|agent message delta|internal route|debug metadata|exit code\s*\d+)\b/i.test(original)) return ''
   if (/^(?:route|backend|tool|function)\s*[:=]/i.test(original) || /^mcp__[\w_]+$/i.test(original)) return ''
+  if (/(?:sk|pk)-[\w-]{12,}|\bBearer\s+[\w.~+/-]{12,}|\b(?:OPENAI_API_KEY|CODEX_API_KEY|PASSWORD|SECRET|TOKEN)=\S+|[\\/]\.(?:codex|ssh|aws|gnupg)[\\/]/i.test(original)) return ''
   if (/^(?:\{[\s\S]*\}|\[[\s\S]*\])$/.test(original)) return ''
   if (/^\s*\|.+\|\s*$/m.test(original) && /\|\s*:?-{3}/.test(original)) return ''
   if (/^(?:const|let|var|function|import|export)\s+|=>|===|&&|\|\|/.test(original)) return ''
@@ -73,10 +74,12 @@ export function toSpeechText(displayText: string, context: SpeechContext = {}): 
   if (/^(?:npm run build|the build)\s+(?:exited with code|finished with exit code)\s+0\.?$/i.test(original) || /^build successful\.?$/i.test(original)) return 'The build finished successfully.'
   if (/^process exited with code [1-9]\d*\.?$/i.test(original)) return 'The command failed.'
   if (/^(?:npm run build|the build)\s+(?:exited with code|finished with exit code)\s+[1-9]\d*\.?$/i.test(original)) return 'The build failed.'
+  if (/^(?!npm run build\b).*(?:exited with code|exit code)\s+0\.?$/i.test(original)) return 'That worked.'
+  if (/^(?!npm run build\b).*(?:exited with code|exit code)\s+[1-9]\d*\.?$/i.test(original)) return 'The command failed.'
   if (/^(?:task completed successfully|operation successful)\.?$/i.test(original)) return 'Done.'
   if (/^certainly\.?$/i.test(original)) return 'Sure.'
-  if (/^error at\s+(.+?)(?::\d+(?::\d+)?)?\.?$/i.test(original)) {
-    const path = original.replace(/^error at\s+/i, '').replace(/:\d+(?::\d+)?\.?$/, '')
+  if (/^(?:typeerror|referenceerror|syntaxerror|error) at\s+(.+?)(?::\d+(?::\d+)?)?\.?$/i.test(original)) {
+    const path = original.replace(/^(?:typeerror|referenceerror|syntaxerror|error) at\s+/i, '').replace(/:\d+(?::\d+)?\.?$/, '')
     return `There's an error in ${basename(path)}.`
   }
   if (/^JARVIS_ALLOW_WRITES=1\.?$/i.test(original)) return 'Write access is enabled.'

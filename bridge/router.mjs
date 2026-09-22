@@ -63,7 +63,10 @@ export function createRouter({requestApproval,emit,request}){
       let result
       if(tool==='shell')result=await shell(args)
       else if(tool==='filesystem')result=await filesystem(args)
-      else if(tool==='browser')result=await browserAction(args)
+      else if(tool==='browser'){
+        result=await browserAction(args)
+        if(result.timings){emit('tool-timing',{tool:'browser',operation:args.operation,...result.timings});delete result.timings}
+      }
       else if(tool==='hud'){
         const value=args.value??{}, id=String(value.id??`hud-${Date.now().toString(36)}-${++hudSeq}`)
         if(args.kind==='panel')emit('panel',{panel:{id,title:String(value.title??'JARVIS'),html:String(value.html??value.markup??''),anim:value.anim??'materialise',slot:value.slot??'right',accent:value.accent??'default',hold:value.hold??'turn'}})

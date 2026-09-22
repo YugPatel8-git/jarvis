@@ -5,7 +5,7 @@ import process from 'node:process'
 import { CodexConversation as ExecFallback, codexModelLabel } from './codex.mjs'
 
 const TURN_TIMEOUT_MS = Number(process.env.JARVIS_TURN_TIMEOUT_MS ?? 120_000)
-const MODEL = process.env.JARVIS_CODEX_MODEL?.trim() || null
+const MODEL = process.env.JARVIS_CODEX_MODEL?.trim() || 'gpt-5.6-sol'
 const FAST_EFFORT = process.env.JARVIS_FAST_EFFORT?.trim() || 'low'
 const STRONG_EFFORT = process.env.JARVIS_STRONG_EFFORT?.trim() || 'high'
 const MAX_SESSION_TURNS = Number(process.env.JARVIS_SESSION_TURNS ?? 24)
@@ -14,8 +14,8 @@ const RECENT_TURNS = 6
 const RECENT_CHARS = 6_000
 const DISABLED_FEATURES = ['plugins', 'apps', 'browser_use', 'computer_use', 'image_generation', 'multi_agent', 'shell_tool', 'skill_search', 'tool_suggest', 'web_search_request']
 const PERSONA = `You are JARVIS. You are speaking out loud to one person.
-Keep conversational replies to at most two short sentences and usually under thirty words. Use plain spoken prose only: no markdown, headings, bullets, code fences, URLs, raw JSON, or emoji. Be dry, precise, calmly competent, and occasionally address the user as sir. Do not claim to have used tools.
-Your only machine capabilities are the tools from the jarvis MCP server. Never bypass that server with built-in shell or filesystem tools. The Codex sandbox is read-only. The router executes normal actions and pauses high-risk actions for explicit user approval. Do not claim success until a tool returns success. Use camera vision only when asked. Never request an API key or expose authentication data.`
+Keep conversational replies to at most two short sentences and usually under thirty words. For a simple factual question, answer with the fact alone when sufficient; for example, a capital-city answer can be just "Tokyo." Add context only when useful. If a question is repeated, answer it directly again instead of referring to an earlier answer. Give complex tasks the detail they need. Use plain spoken prose only: no markdown, headings, bullets, code fences, URLs, raw JSON, or emoji. Be dry, precise, calmly competent, and occasionally address the user as sir. Do not claim to have used tools.
+Your only machine capabilities are the tools from the jarvis MCP server. When asked about the current webpage, use its browser read tool before answering. Call tools without narrating progress; answer when results are ready. Never bypass that server with built-in shell or filesystem tools. The Codex sandbox is read-only. The router executes normal actions and pauses high-risk actions for explicit user approval. Do not claim success until a tool returns success. Use camera vision only when asked. Never request an API key or expose authentication data.`
 
 function commandFor(args) {
   if (process.platform !== 'win32') return { command: 'codex', args }
@@ -25,8 +25,8 @@ function mcpPath() {
   const url = new URL('./mcp-server.mjs', import.meta.url)
   return decodeURIComponent(url.pathname.replace(/^\/(?:[A-Za-z]:)/, (m) => m.slice(1))).replaceAll('/', '\\')
 }
-function isComplex(prompt) {
-  return /\b(debug|diagnos|architect|design|plan|refactor|race condition|security review|analy[sz]e|compare|investigate|implement|codebase|project)\b/i.test(prompt) || prompt.length > 900
+export function isComplex(prompt) {
+  return /\b(debug\w*|diagnos\w*|architect\w*|design|plan\w*|refactor\w*|race condition|security|analy[sz]e|compar\w*|investigat\w*|implement\w*|codebase|project|coding|programming|(?:write|build|create|modify|edit)\b.{0,60}\b(?:function|script|program|app|code|test)|fix (?:this |the )?(?:bug|error|code))\b/i.test(prompt) || prompt.length > 900
 }
 function safeEnv(routerToken) {
   const env = { ...process.env, JARVIS_ROUTER_TOKEN: routerToken }
@@ -36,10 +36,11 @@ function safeEnv(routerToken) {
 }
 
 export class CodexAppServerConversation {
-  constructor({ cwd, onText, onTool, onTiming, onState, routerToken }) {
+  constructor({ cwd, onText, onTool, onTiming, onState, onRouting, routerToken }) {
     Object.assign(this, { cwd, onText, onTool, routerToken })
     this.onTiming = onTiming ?? (() => {})
     this.onState = onState ?? (() => {})
+    this.onRouting = onRouting ?? (() => {})
     this.child = null; this.pending = new Map(); this.requestId = 0
     this.threadId = null; this.turnId = null; this.active = null; this.starting = null
     this.interrupting = null
@@ -110,7 +111,9 @@ export class CodexAppServerConversation {
     this.onTiming('bridgePromptProcessingMs', performance.now() - start)
     try {
       const submitted = performance.now()
-      const result = await this.#request('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt, text_elements: [] }], effort: this.#effort(prompt), summary: 'none', approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
+      const effort = this.#effort(prompt)
+      this.onRouting({ model: this.model, effort })
+      const result = await this.#request('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt, text_elements: [] }], effort, summary: 'none', approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
       this.turnId = result.turn.id; this.onTiming('requestSubmissionMs', performance.now() - submitted)
       return await completion
     } catch (err) {
@@ -135,7 +138,7 @@ export class CodexAppServerConversation {
     if (msg.method === 'item/agentMessage/delta' && typeof msg.params?.delta === 'string') {
       if (!active.firstText) { active.firstText = true; this.onTiming('firstTextMs', elapsed) }
       active.answer += msg.params.delta; this.onText(msg.params.delta)
-    } else if (msg.method === 'item/started' && msg.params?.item?.type && msg.params.item.type !== 'agentMessage') this.onTool(String(msg.params.item.type).replaceAll('_', ' '))
+    } else if (msg.method === 'item/started' && ['mcpToolCall','commandExecution'].includes(msg.params?.item?.type)) this.onTool(String(msg.params.item.type).replaceAll('_', ' '))
     else if (msg.method === 'turn/started') this.turnId = msg.params?.turn?.id ?? this.turnId
     else if (msg.method === 'turn/completed') this.#finish(msg.params?.turn?.status === 'failed' ? new Error(msg.params?.turn?.error?.message ?? 'Codex turn failed') : null)
   }
