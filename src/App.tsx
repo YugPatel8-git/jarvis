@@ -10,6 +10,7 @@ import * as sfx from './lib/sfx'
 import * as music from './lib/music'
 import * as hands from './lib/hands'
 import * as camera from './lib/camera'
+import * as screen from './lib/screen'
 import * as kokoro from './lib/kokoro'
 import { TTS_ENGINE } from './config'
 import {
@@ -118,6 +119,7 @@ export default function App() {
 
   const respond = async (said: string): Promise<void> => {
     const mine = ++turn.current
+    const turnStartedAt = performance.now()
     const stale = () => mine !== turn.current
 
     clearIdle()
@@ -151,6 +153,7 @@ export default function App() {
       await ask(said, history.current, {
         onText: (delta) => {
           if (stale()) return
+          if (screen.diag.visionRequestAt >= turnStartedAt && !screen.diag.firstResponseMs) screen.diag.firstResponseMs = Math.round(performance.now() - screen.diag.visionRequestAt)
           spk.markModelDelta()
           clearTimeout(ackTimer)
           if (!started) {
@@ -182,6 +185,8 @@ export default function App() {
       })
 
       if (stale()) return
+
+      if (screen.diag.visionRequestAt >= turnStartedAt) screen.diag.totalMs = Math.round(performance.now() - screen.diag.visionRequestAt)
 
       await spk.end()
       if (stale()) return
@@ -310,6 +315,11 @@ export default function App() {
      * distrust an assistant — so the interface says it before they have to ask.
      */
     watchCapture(async (req) => {
+      if (req.source === 'screen') {
+        screen.diag.visionRequestAt = performance.now()
+        screen.diag.firstResponseMs = 0; screen.diag.totalMs = 0
+        return screen.captureFrame()
+      }
       const note =
         req.mode === 'watch'
           ? req.when === 'past'
@@ -546,6 +556,7 @@ export default function App() {
       speaker.current?.cancel()
       // The camera must not outlive the page that turned it on.
       hands.disableHands()
+      screen.stopSharing()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

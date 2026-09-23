@@ -11,10 +11,11 @@ const tool=(name,description,schema)=>server.tool(name,description,schema,async(
   const v=await callRouter(name,a)
   if(name==='vision'&&v?.data){
     const hash=createHash('sha256').update(v.data).digest('hex'), now=Date.now()
-    if(lastVision.hash===hash&&now-lastVision.at<60000)return {content:[{type:'text',text:'The requested camera image is unchanged from the previous frame.'}]}
+    if(lastVision.hash===hash&&now-lastVision.at<60000)return {content:[{type:'text',text:'The requested image is unchanged from the previous frame.'}]}
     lastVision={hash,at:now}
-    return {content:[{type:'text',text:'Camera capture requested by the user.'},{type:'image',data:v.data,mimeType:v.mimeType??'image/jpeg'}]}
+    return {content:[{type:'text',text:a.source==='screen'?'Current user-shared screen frame.':'Camera capture requested by the user.'},{type:'image',data:v.data,mimeType:v.mimeType??'image/jpeg'}]}
   }
+  if(name==='vision'&&v?.unchanged)return {content:[{type:'text',text:'The shared screen is unchanged from the previous frame; use the previous image context.'}]}
   if(name==='browser'&&v?.image)return {content:[{type:'text',text:'Screenshot of the current isolated Chrome tab.'},{type:'image',data:v.image,mimeType:v.mimeType??'image/jpeg'}]}
   return response(v)
 })
@@ -31,7 +32,7 @@ tool('filesystem','Read/list/stat or create/write/move/delete ordinary files. Cr
 tool('hud','Show a sanitized JARVIS panel or blade, or change the HUD through constrained operations. For panel/blade value, supply title and html; optional kind, size, slot, accent, animation, and hold are normalized by the router.',{
   kind:z.enum(['panel','blade','ui']),operation:z.string().optional(),value:z.record(z.string(),z.unknown()),
 })
-tool('vision','Capture one requested camera frame or a short frame grid. Never use speculatively; browser camera permission still applies.',{
-  mode:z.enum(['look','watch']).default('look'),reason:z.string().optional(),seconds:z.number().min(2).max(15).optional(),when:z.enum(['now','past']).optional(),
+tool('vision','Capture one camera frame or one currently shared screen frame. Use source=screen only for a user question about visible screen content; if sharing is off, report that it is unavailable. Prefer browser read for accessible webpage text. Never capture speculatively.',{
+  source:z.enum(['camera','screen']).default('camera'),mode:z.enum(['look','watch']).default('look'),reason:z.string().optional(),seconds:z.number().min(2).max(15).optional(),when:z.enum(['now','past']).optional(),
 })
 await server.connect(new StdioServerTransport())

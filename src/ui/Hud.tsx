@@ -6,6 +6,7 @@ import { BladeSweep, Blades } from './Blades'
 import { Effects } from './Effects'
 import { Pointer } from './Pointer'
 import { GestureGuide } from './GestureGuide'
+import * as screen from '../lib/screen'
 
 const statusText: Record<Phase, string> = {
   dormant: 'CONNECTED — PRESS TALK',
@@ -144,6 +145,15 @@ function DecodeText({ text }: { text: string }) {
 /* --------------------------------------------------------------------- hud */
 
 export function Hud({ onTalk }: { onTalk: () => void }) {
+  const [screenOn, setScreenOn] = useState(screen.sharing)
+  useEffect(() => screen.subscribe(() => setScreenOn(screen.sharing())), [])
+  const toggleScreen = () => {
+    if (screenOn) { screen.stopSharing(); return }
+    void screen.startSharing().catch((error) => {
+      // A cancelled browser picker simply leaves sharing off.
+      if ((error as Error)?.name !== 'NotAllowedError') console.warn('[jarvis] screen sharing unavailable:', (error as Error)?.name ?? 'unknown')
+    })
+  }
   const phase = useStore((s) => s.phase)
   const bridgeReady = useStore((s) => s.bridgeReady)
   const caption = useStore((s) => s.caption)
@@ -307,6 +317,10 @@ export function Hud({ onTalk }: { onTalk: () => void }) {
 
       <footer className="hud-bottom">
         <span className="hint">
+          <button type="button" className="screen-button" onClick={toggleScreen} aria-pressed={screenOn} aria-label={screenOn ? 'Stop screen sharing' : 'Share screen'}>
+            {screenOn ? `SCREEN SHARING${screen.sourceType() ? ` · ${screen.sourceType()}` : ''}` : 'SCREEN OFF'}
+          </button>
+          {' · '}
           <button type="button" className="talk-button" onClick={onTalk} aria-label="Start microphone listening">
             {phase === 'dormant' ? 'TALK' : 'MIC ON'}
           </button>

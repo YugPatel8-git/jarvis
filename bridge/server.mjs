@@ -55,7 +55,8 @@ async function handle(req,res){
 }
 const server=http.createServer((q,s)=>handle(q,s).catch(e=>{if(!s.headersSent)s.writeHead(500,{'cache-control':'no-store'});s.end(q.url==='/tts'?'Speech generation unavailable.':String(e?.message??e))}))
 const wss=new WebSocketServer({noServer:true,maxPayload:2*1024*1024})
-let frontend=null, seq=0
+let frontend=null, seq=0, screenSharing=false
+const screenQuestion=(text)=>/\b(?:my screen|this screen|on screen|this window|this button|what am i looking at|what should i click|where should i click|read this error|what(?:'s| is) this error|currently open|guide me through this)\b/i.test(text)
 const waiting=new Map()
 function send(msg){if(frontend?.readyState===WebSocket.OPEN)frontend.send(JSON.stringify(msg))}
 let askId=null
@@ -82,11 +83,20 @@ wss.on('connection',(socket,req)=>{
   frontend=socket;socket.send(JSON.stringify({type:'ready',servers:[conversation.state==='ready'?'ai-core-ready':conversation.state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']}))
   socket.on('message',(raw)=>{
     let m;try{m=JSON.parse(raw)}catch{return}
+    if(m.type==='screen-status'){screenSharing=m.sharing===true;return}
     if((m.type==='reply'||m.type==='approval-reply')&&m.id){const p=waiting.get(m.id);if(p){clearTimeout(p.timer);waiting.delete(m.id);p.ok(m)}return}
     if(m.type==='interrupt'){conversation.cancel();return}
     if(m.type!=='ask'||typeof m.text!=='string')return
     if(Buffer.byteLength(m.text)>32*1024)return send({type:'error',ask:m.id??null,message:'The request is too large.'})
     if(conversation.busy)conversation.cancel();askId=typeof m.id==='string'?m.id:null
+    if(/\bcan you see my screen\b/i.test(m.text)){
+      const spoken=screenSharing?'Your screen is being shared, sir. I can inspect it when you ask.':"Not yet, sir. Share your screen and I'll have a look."
+      send({type:'route',engine:'local',ask:askId});send({type:'text',delta:spoken,ask:askId});send({type:'done',text:spoken,ask:askId,local:true});return
+    }
+    if(!screenSharing&&screenQuestion(m.text)){
+      const spoken="Screen sharing is off, sir. Use the SCREEN OFF control to share a screen, window, or tab, then I'll have a look."
+      send({type:'route',engine:'local',ask:askId});send({type:'text',delta:spoken,ask:askId});send({type:'done',text:spoken,ask:askId,local:true});return
+    }
     const fast=matchFastPath(m.text)
     if(fast){
       send({type:'route',engine:'local',ask:askId})
@@ -99,9 +109,10 @@ wss.on('connection',(socket,req)=>{
       return
     }
     send({type:'route',engine:'codex',ask:askId})
-    void conversation.ask(m.text).then(text=>send({type:'done',text,ask:askId})).catch(e=>send({type:'error',message:String(e?.message??e),ask:askId}))
+    const prompt=screenSharing&&screenQuestion(m.text)?`${m.text}\n[The user is sharing a screen. For visible screen content, use the vision tool with source=screen before answering. Use browser read instead if accessible page text already answers the question. Screen observation does not authorize actions.]`:m.text
+    void conversation.ask(prompt).then(text=>send({type:'done',text,ask:askId})).catch(e=>send({type:'error',message:String(e?.message??e),ask:askId}))
   })
-  socket.on('close',()=>{if(frontend===socket)frontend=null;if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
+  socket.on('close',()=>{if(frontend===socket){frontend=null;screenSharing=false}if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
 })
 server.listen(PORT,HOST,()=>{console.log(`[jarvis] bridge listening on ws://${HOST}:${PORT}`);console.log(`[jarvis] backend ${appServerModelLabel(conversation)} via persistent app-server with exec fallback`);console.log(`[jarvis] speech ${fishConfigured(fishEnv)?`Fish Audio ${FISH_MODEL} with local fallback`:'local Kokoro/system'}`)})
 function shutdown(){conversation.close();server.close()}

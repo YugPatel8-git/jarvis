@@ -36,6 +36,7 @@ type Frame = {
   mode?: string
   seconds?: number
   when?: string
+  source?: string
   servers?: Array<string | { name?: string }>
   state?: string
   metric?: string
@@ -47,6 +48,11 @@ let askSeq = 0
 
 let socket: WebSocket | null = null
 let connecting: Promise<WebSocket> | null = null
+let screenSharing = false
+export function setScreenSharing(active: boolean): void {
+  screenSharing = active
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'screen-status', sharing: active }))
+}
 
 /** Server names reported by the bridge, for the HUD readout. */
 let servers: string[] = []
@@ -80,8 +86,9 @@ export type CaptureRequest = {
   seconds: number
   /** 'now' records forward; 'past' reads the rolling buffer. */
   when: 'now' | 'past'
+  source: 'camera' | 'screen'
 }
-export type CaptureResult = { data?: string; mimeType?: string; error?: string }
+export type CaptureResult = { data?: string; mimeType?: string; error?: string; unchanged?: boolean }
 
 let onCapture: ((req: CaptureRequest) => Promise<CaptureResult>) | null = null
 export function watchCapture(fn: (req: CaptureRequest) => Promise<CaptureResult>) {
@@ -202,6 +209,7 @@ function dispatch(ws: WebSocket) {
           reason: msg.reason ?? '',
           seconds: Math.max(2, Math.min(15, Number(msg.seconds) || 6)),
           when: msg.when === 'past' ? 'past' : 'now',
+          source: msg.source === 'screen' ? 'screen' : 'camera',
         })
           .then(reply)
           .catch((err) => reply({ error: String(err?.message ?? err) }))
@@ -257,6 +265,7 @@ function connect(): Promise<WebSocket> {
 
     ws.onopen = () => {
       socket = ws
+      ws.send(JSON.stringify({ type: 'screen-status', sharing: screenSharing }))
       attempt = 0
       dispatch(ws)
       settle(null)

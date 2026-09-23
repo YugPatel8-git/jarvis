@@ -84,7 +84,7 @@ export function createRouter({requestApproval,emit,request}){
         else emit('ui',{op:args.operation,args:value})
         result={displayed:true,id}
       }
-      else if(tool==='vision')result=await request('capture',{mode:args.mode??'look',reason:String(args.reason??'').slice(0,80),seconds:Math.max(2,Math.min(15,Number(args.seconds)||6)),when:args.when==='past'?'past':'now'},45000)
+      else if(tool==='vision')result=await request('capture',{source:args.source==='screen'?'screen':'camera',mode:args.mode??'look',reason:String(args.reason??'').slice(0,80),seconds:Math.max(2,Math.min(15,Number(args.seconds)||6)),when:args.when==='past'?'past':'now'},45000)
       else if(tool==='mcp')throw new Error('External MCP adapters are disabled until an explicitly allowlisted adapter can route every action through this permission layer.')
       else throw new Error(`Unknown tool: ${tool}`)
       await audit({tool,classification:policy.classification,approvalRequested:policy.classification===HIGH_RISK,approved,success:true})

@@ -44,6 +44,8 @@ type TtsDiag = {
   phraseGapMs: number
 }
 
+type ScreenDiag = { sharing: boolean; source: string; captureMs: number; encodeMs: number; payloadBytes: number; firstResponseMs: number; totalMs: number }
+
 const ago = (t: number) => (t ? `${((Date.now() - t) / 1000).toFixed(1)}s ago` : '—')
 
 function Row({ k, v, bad }: { k: string; v: string; bad?: boolean }) {
@@ -85,6 +87,7 @@ export function Diagnostics() {
   const w = window as unknown as Record<string, unknown>
   const v = (w.__voice ?? {}) as Partial<VoiceDiag>
   const t = (w.__tts ?? {}) as Partial<TtsDiag>
+  const screen = (w.__screen ?? {}) as Partial<ScreenDiag>
   const update = (next: Partial<VoiceSettings>) => { setVoiceSettings(next); setOutput(voiceSettings()) }
 
   // The two verdicts worth stating outright, rather than making you infer them
@@ -133,6 +136,12 @@ export function Diagnostics() {
       <div className="diag-sec">LAST PHRASE · MS FROM READY</div>
       {Object.entries(t.stages ?? {}).map(([stage, ms]) => <Row key={stage} k={stage} v={`${ms} ms`} />)}
       <Row k="last phrase gap" v={t.phraseGapMs === undefined ? '—' : `${t.phraseGapMs} ms`} />
+      <div className="diag-sec">SCREEN</div>
+      <Row k="sharing" v={screen.sharing ? `on · ${screen.source || 'selected source'}` : 'off'} />
+      <Row k="capture / encode" v={`${screen.captureMs ?? 0} / ${screen.encodeMs ?? 0} ms`} />
+      <Row k="frame payload" v={`${screen.payloadBytes ?? 0} bytes`} />
+      <Row k="vision to first reply" v={`${screen.firstResponseMs ?? 0} ms`} />
+      <Row k="vision to turn end" v={`${screen.totalMs ?? 0} ms`} />
       <Row k="error" v={t.lastError || '—'} bad={Boolean(t.lastError)} />
     </div>
   )

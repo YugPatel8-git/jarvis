@@ -1689,3 +1689,17 @@ kbd {
   transform: scaleX(-1);
   background: #000;
 }
+
+.screen-button {
+  font: inherit;
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 3px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.screen-button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 18%, black);
+  border-color: var(--accent);
+}
