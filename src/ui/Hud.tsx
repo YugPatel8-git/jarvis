@@ -146,13 +146,31 @@ function DecodeText({ text }: { text: string }) {
 
 export function Hud({ onTalk }: { onTalk: () => void }) {
   const [screenOn, setScreenOn] = useState(screen.sharing)
+  const [screenRequesting, setScreenRequesting] = useState(false)
+  const [screenError, setScreenError] = useState('')
   useEffect(() => screen.subscribe(() => setScreenOn(screen.sharing())), [])
   const toggleScreen = () => {
+    console.info('[jarvis] SCREEN BUTTON CLICKED')
     if (screenOn) { screen.stopSharing(); return }
-    void screen.startSharing().catch((error) => {
-      // A cancelled browser picker simply leaves sharing off.
-      if ((error as Error)?.name !== 'NotAllowedError') console.warn('[jarvis] screen sharing unavailable:', (error as Error)?.name ?? 'unknown')
-    })
+    if (screenRequesting) return
+    setScreenError('')
+    setScreenRequesting(true)
+    // startSharing invokes getDisplayMedia before its first await, inside this click.
+    void screen.startSharing().catch((error: unknown) => {
+      const name = error instanceof Error ? error.name : 'UnknownError'
+      console.warn(`[jarvis] SCREEN SHARE ERROR: ${name}`)
+      const reason: Record<string, string> = {
+        NotSupportedError: 'SCREEN SHARE UNSUPPORTED',
+        SecurityError: 'Screen sharing needs localhost or a secure connection.',
+        NotAllowedError: 'Screen sharing was cancelled or blocked by Chrome.',
+        AbortError: 'Screen sharing was cancelled.',
+        NotFoundError: 'No screen or window was available to share.',
+        InvalidStateError: 'Select this tab and try sharing again.',
+        NotReadableError: 'Chrome could not read that screen or window.',
+        TypeError: 'Chrome could not start screen sharing.',
+      }
+      if (name !== 'AbortError') setScreenError(reason[name] ?? 'Screen sharing could not start.')
+    }).finally(() => setScreenRequesting(false))
   }
   const phase = useStore((s) => s.phase)
   const bridgeReady = useStore((s) => s.bridgeReady)
@@ -309,12 +327,12 @@ export function Hud({ onTalk }: { onTalk: () => void }) {
 
       {ui.chrome.suggestions && <Suggestions />}
 
-      {error && <div className="error">{error}</div>}
+      {(screenError || error) && <div className="error" role="alert">{screenError || error}</div>}
 
       <footer className="hud-bottom">
         <span className="hint">
-          <button type="button" className="screen-button" onClick={toggleScreen} aria-pressed={screenOn} aria-label={screenOn ? 'Stop screen sharing' : 'Share screen'}>
-            {screenOn ? `SCREEN SHARING${screen.sourceType() ? ` · ${screen.sourceType()}` : ''}` : 'SCREEN OFF'}
+          <button type="button" className="screen-button" onClick={toggleScreen} disabled={screenRequesting} aria-pressed={screenOn} aria-label={screenOn ? 'Stop screen sharing' : 'Share screen'}>
+            {screenRequesting ? 'SCREEN REQUESTING...' : screenOn ? `SCREEN SHARING${screen.sourceType() ? ` · ${screen.sourceType()}` : ''}` : 'SCREEN OFF'}
           </button>
           {' · '}
           <button type="button" className="talk-button" onClick={onTalk} aria-label="Start microphone listening">

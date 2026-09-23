@@ -1691,6 +1691,7 @@ kbd {
 }
 
 .screen-button {
+  pointer-events: auto;
   font: inherit;
   color: var(--accent);
   background: rgba(0, 0, 0, 0.45);
@@ -1699,6 +1700,7 @@ kbd {
   padding: 5px 8px;
   cursor: pointer;
 }
+.screen-button:disabled { cursor: wait; opacity: 0.7; }
 .screen-button[aria-pressed="true"] {
   background: color-mix(in srgb, var(--accent) 18%, black);
   border-color: var(--accent);

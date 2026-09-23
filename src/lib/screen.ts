@@ -30,6 +30,13 @@ export function stopSharing(): void {
 /** Must be called directly from the screen button's user gesture. */
 export async function startSharing(): Promise<void> {
   if (sharing()) return
+  if (typeof window !== 'undefined' && window.isSecureContext === false) {
+    throw Object.assign(new Error('Screen sharing requires localhost or a secure connection.'), { name: 'SecurityError' })
+  }
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw Object.assign(new Error('Screen sharing is unsupported in this browser.'), { name: 'NotSupportedError' })
+  }
+  console.info('[jarvis] GETDISPLAYMEDIA REQUESTED')
   const selected = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
   const track = selected.getVideoTracks()[0]
   if (!track) { selected.getTracks().forEach((t) => t.stop()); throw new Error('No screen video was selected.') }
@@ -44,6 +51,7 @@ export async function startSharing(): Promise<void> {
     diag.source = surface === 'monitor' ? 'Screen' : surface === 'window' ? 'Window' : surface === 'browser' ? 'Tab' : ''
     diag.sharing = true
     notify()
+    console.info('[jarvis] SCREEN SHARE STARTED')
   } catch (error) { selected.getTracks().forEach((t) => t.stop()); throw error }
 }
 
