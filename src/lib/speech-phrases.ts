@@ -22,7 +22,9 @@ export function takeSpeechPhrases(buffer: string): { phrases: string[]; rest: st
       const words = candidate.match(/[\p{L}\p{N}]+/gu)?.length ?? 0
       const punctuation = match[0][0]
       if (punctuation === '.' && ABBREVIATION.test(candidate.trimEnd())) continue
-      if (/[,:]/.test(punctuation) && words < 6) continue
+      // A short complete acknowledgement can start while the next sentence
+      // is still arriving. Keep comma clauses substantial enough to sound human.
+      if (/[,:]/.test(punctuation) && words < 5) continue
       if (punctuation === ';' && words < 4) continue
       // The whitespace after punctuation makes this a stable boundary. The
       // normalizer handles any technical content inside the phrase.

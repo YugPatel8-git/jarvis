@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
+import { setVoiceSettings, voiceSettings, type VoiceSettings } from '../lib/tts'
 
 /**
  * The "why can't he hear me / why can't I hear him" panel.
@@ -39,6 +40,8 @@ type TtsDiag = {
   lastError: string
   voice: string
   lastText: string
+  stages: Record<string, number>
+  phraseGapMs: number
 }
 
 const ago = (t: number) => (t ? `${((Date.now() - t) / 1000).toFixed(1)}s ago` : '—')
@@ -54,6 +57,7 @@ function Row({ k, v, bad }: { k: string; v: string; bad?: boolean }) {
 
 export function Diagnostics() {
   const [open, setOpen] = useState(false)
+  const [output, setOutput] = useState<VoiceSettings>(voiceSettings)
   const [, tick] = useState(0)
   const phase = useStore((s) => s.phase)
 
@@ -81,6 +85,7 @@ export function Diagnostics() {
   const w = window as unknown as Record<string, unknown>
   const v = (w.__voice ?? {}) as Partial<VoiceDiag>
   const t = (w.__tts ?? {}) as Partial<TtsDiag>
+  const update = (next: Partial<VoiceSettings>) => { setVoiceSettings(next); setOutput(voiceSettings()) }
 
   // The two verdicts worth stating outright, rather than making you infer them
   // from the numbers underneath.
@@ -121,6 +126,13 @@ export function Diagnostics() {
       <Row k="handed to voice" v={String(t.spoken ?? 0)} />
       <Row k="actually spoke" v={String(t.started ?? 0)} bad={(t.started ?? 0) === 0} />
       <Row k="failures" v={String(t.failures ?? 0)} bad={(t.failures ?? 0) > 0} />
+      <div className="diag-sec">VOICE OUTPUT</div>
+      <label className="diag-row">Voice volume <input aria-label="Voice volume" type="range" min="80" max="150" step="5" value={output.volume} onChange={(e) => update({ volume: Number(e.target.value) })} /> {output.volume}%</label>
+      <label className="diag-row">Voice clarity <select aria-label="Voice clarity" value={output.clarity} onChange={(e) => update({ clarity: e.target.value as VoiceSettings['clarity'] })}><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option></select></label>
+      <label className="diag-row">Phrase gap <select aria-label="Phrase gap" value={output.gap} onChange={(e) => update({ gap: e.target.value as VoiceSettings['gap'] })}><option value="natural">Natural</option><option value="tight">Tight</option></select></label>
+      <div className="diag-sec">LAST PHRASE · MS FROM READY</div>
+      {Object.entries(t.stages ?? {}).map(([stage, ms]) => <Row key={stage} k={stage} v={`${ms} ms`} />)}
+      <Row k="last phrase gap" v={t.phraseGapMs === undefined ? '—' : `${t.phraseGapMs} ms`} />
       <Row k="error" v={t.lastError || '—'} bad={Boolean(t.lastError)} />
     </div>
   )

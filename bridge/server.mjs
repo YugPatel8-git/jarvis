@@ -95,7 +95,7 @@ wss.on('connection',(socket,req)=>{
         const spoken=value?.denied?value.message:fast.spoken
         if(spoken)send({type:'text',delta:spoken,ask:askId})
         send({type:'done',text:spoken||'',ask:askId,local:true})
-      }).catch(e=>send({type:'error',message:String(e?.message??e),ask:askId,local:true}))
+      }).catch(e=>send({type:'error',message:`${fast.tool==='shell'&&/npm run build/.test(fast.args.args?.join(' ')??'')?'The build failed, sir. ':''}${String(e?.message??e)}`,ask:askId,local:true}))
       return
     }
     send({type:'route',engine:'codex',ask:askId})

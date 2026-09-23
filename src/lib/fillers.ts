@@ -5,38 +5,27 @@
  * JARVIS says something the instant work starts — then goes quiet until he has
  * an answer. One acknowledgement, no progress chatter.
  *
- * The phrasing follows the character's actual grammar rather than generic
- * assistant-speak, which matters more than it sounds:
- *
- *   - Working lines are subjectless present participles: "Compiling.",
- *     "Cross-referencing." Not "I'm now checking" and never "let me".
- *   - There is no snap-to compliance formula. "Right away" and "At once" are
- *     not in his vocabulary; acknowledgement is deferential, not eager.
- *   - No filler words, no enthusiasm, no apology, no exclamation marks.
- *   - "Sir" fronted means urgency; final means routine. These are all routine,
- *     so it goes at the end, and only sometimes.
+ * Keep acknowledgements short and conversational. Vary "sir" naturally;
+ * the actual answer still follows the tool result.
  */
 
 /** Said as soon as the first tool fires, before any answer exists. */
 const WORKING = [
   'Working on it, sir.',
-  'Compiling.',
-  'Retrieving.',
-  'Accessing the archive.',
-  'Cross-referencing.',
-  'Running the query now.',
-  'Searching.',
-  'Under way.',
+  "I'll take a look, sir.",
+  'Checking that now.',
+  "Give me a moment, sir.",
+  "I'm on it.",
+  'Looking into it, sir.',
 ]
 
 /** Acknowledging an order where no tool is involved. */
 const ACKNOWLEDGE = [
-  'As you wish, sir.',
-  'Very good, sir.',
-  'Certainly.',
-  'Understood.',
-  'Consider it done.',
-  'Directly, sir.',
+  'Right away, sir.',
+  "I'll take care of that.",
+  'Consider it handled, sir.',
+  "I'm on it.",
+  'That should be straightforward, sir.',
 ]
 
 /** Answering to his name, before the user has said what they want. */
