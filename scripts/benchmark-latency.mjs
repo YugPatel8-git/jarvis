@@ -100,6 +100,9 @@ const summary = prompts.map((prompt) => {
     prompt, runs: group.length,
     model: [...new Set(group.map((row) => row.model))],
     effort: [...new Set(group.map((row) => row.effort))],
+    frontendToBridgeEventMs: stats(group.map((row) => row.firstEventMs)),
+    routerTotalMs: stats(group.flatMap((row) => row.toolTimings.map((timing) => timing.routerTotalMs))),
+    toolOperationMs: stats(group.flatMap((row) => row.toolTimings.map((timing) => timing.operationMs))),
     firstAppEventMs: stats(group.map((row) => row.server.firstCodexEventMs)),
     firstModelDeltaMs: stats(group.map((row) => row.firstModelDeltaMs)),
     firstVisibleBridgeTextMs: stats(group.map((row) => row.firstVisibleTextMs)),
@@ -111,4 +114,33 @@ const summary = prompts.map((prompt) => {
     totalCompletionMs: stats(group.map((row) => row.totalMs)),
   }
 })
-console.log(JSON.stringify({ note: 'Audio and HUD paint timings require a live browser; null means unmeasured, not zero.', summary, rows }, null, 2))
+
+async function fishTrials() {
+  if (process.env.JARVIS_BENCH_FISH !== '1') return null
+  const samples = []
+  const endpoint = `http://127.0.0.1:${process.env.JARVIS_BRIDGE_PORT ?? 8787}/tts`
+  const phrase = 'Yes, sir. Everything is operating normally.'
+  for (let i = 0; i <= runs; i++) {
+    const started = performance.now()
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { origin: 'http://localhost:5173', 'content-type': 'application/json' },
+        body: JSON.stringify({ text: phrase }),
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (!response.ok || !response.body) return { available: false, status: response.status, warmTrials: samples.length }
+      const reader = response.body.getReader()
+      let firstByteMs = null
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value?.length && firstByteMs === null) firstByteMs = performance.now() - started
+      }
+      if (i > 0) samples.push({ firstByteMs, completeMs: performance.now() - started })
+    } catch (error) { return { available: false, error: error?.name ?? 'network error', warmTrials: samples.length } }
+  }
+  return { available: true, warmTrials: samples.length, requestToFirstByteMs: stats(samples.map((row) => row.firstByteMs)), requestToCompleteMs: stats(samples.map((row) => row.completeMs)) }
+}
+
+console.log(JSON.stringify({ note: 'Audio playback and HUD paint timings require a live browser; null means unmeasured, not zero.', summary, fish: await fishTrials(), rows }, null, 2))

@@ -23,16 +23,17 @@ async function ensure(url='about:blank') {
   for(let i=0;i<20;i++){ await wait(150); try { await api('/json/version'); return } catch {} }
   throw new Error('Chrome local automation endpoint did not start.')
 }
-async function tabs(){ await ensure(); return (await api('/json')).filter((t)=>t.type==='page') }
+async function tabs(ready=false){ if(!ready)await ensure(); return (await api('/json')).filter((t)=>t.type==='page') }
 async function cdp(target,method,params={}) {
   return new Promise((ok,no)=>{
     // CDP request ids are protocol integers. Epoch milliseconds exceed the
     // 32-bit range accepted by current Chrome builds and receive no response.
     const ws=new WebSocket(target.webSocketDebuggerUrl), id=++cdpSeq
-    const timer=setTimeout(()=>{ws.close();no(new Error('Chrome operation timed out'))},10000)
+    const finish=(error,result)=>{clearTimeout(timer);ws.close();if(error)no(error);else ok(result)}
+    const timer=setTimeout(()=>finish(new Error('Chrome operation timed out')),10000)
     ws.on('open',()=>ws.send(JSON.stringify({id,method,params})))
-    ws.on('message',(raw)=>{const m=JSON.parse(raw);if(m.id!==id)return;clearTimeout(timer);ws.close();if(m.error)no(new Error(m.error.message));else ok(m.result)})
-    ws.on('error',no)
+    ws.on('message',(raw)=>{let m;try{m=JSON.parse(raw)}catch{return}if(m.id!==id)return;finish(m.error?new Error(m.error.message):null,m.result)})
+    ws.on('error',(error)=>finish(error))
   })
 }
 function url(raw){const u=new URL(String(raw));if(!['http:','https:'].includes(u.protocol))throw new Error('Only http(s) navigation is allowed.');return u.href}
@@ -45,12 +46,12 @@ export async function browserAction(a) {
     if(op==='youtube_search')dest=`https://www.youtube.com/results?search_query=${encodeURIComponent(a.query??'')}`
     dest=url(dest); await ensure()
     if(op==='open'){const r=await fetch(`http://127.0.0.1:${PORT}/json/new?${encodeURIComponent(dest)}`,{method:'PUT'});if(!r.ok)throw new Error('Chrome refused the tab.');return {opened:dest}}
-    const t=(await tabs())[0]; if(!t) return browserAction({operation:'open',url:dest})
+    const t=(await tabs(true))[0]; if(!t) return browserAction({operation:'open',url:dest})
     await cdp(t,'Page.navigate',{url:dest}); return {navigated:dest}
   }
   const list=await tabs()
   if(op==='tabs')return list.map(({id,title,url})=>({id,title,url}))
-  if(op==='close_all'){for(const item of list)await fetch(`http://127.0.0.1:${PORT}/json/close/${encodeURIComponent(item.id)}`);return {closed:list.length}}
+  if(op==='close_all'){await Promise.all(list.map((item)=>fetch(`http://127.0.0.1:${PORT}/json/close/${encodeURIComponent(item.id)}`)));return {closed:list.length}}
   if(op==='next_tab'||op==='previous_tab'){
     if(!list.length)throw new Error('No Chrome tab is available.')
     const index=op==='next_tab'?(list.length>1?1:0):list.length-1
@@ -86,18 +87,25 @@ export async function browserAction(a) {
       if(!root)return {text:'',extractionMs:0,cleanupMs:0}
       const skip='script,style,noscript,template,svg,canvas,nav,header,footer,aside,form,[hidden],[aria-hidden="true"],[class*="advert"],[class*="cookie"],[class*="popup"],[class*="modal"]'
       const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),seen=new Set(),lines=[]
+      const visibility=new WeakMap()
+      let length=0
       let cleanupMs=0
       while(walker.nextNode()){
         const parent=walker.currentNode.parentElement
-        if(!parent||parent.closest(skip))continue
-        const style=getComputedStyle(parent)
-        if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0||!parent.getClientRects().length)continue
+        if(!parent)continue
+        let visible=visibility.get(parent)
+        if(visible===undefined){
+          const style=getComputedStyle(parent)
+          visible=!parent.closest(skip)&&style.display!=='none'&&style.visibility!=='hidden'&&Number(style.opacity)!==0&&Boolean(parent.getClientRects().length)
+          visibility.set(parent,visible)
+        }
+        if(!visible)continue
         const cleanAt=performance.now()
         const line=(walker.currentNode.nodeValue||'').replace(/\\s+/g,' ').trim()
         cleanupMs+=performance.now()-cleanAt
         if(line.length<2||seen.has(line))continue
-        seen.add(line);lines.push(line)
-        if(lines.join('\\n').length>=18000)break
+        seen.add(line);lines.push(line);length+=line.length+1
+        if(length>=18000)break
       }
       const cleanAt=performance.now(),text=lines.join('\\n').slice(0,18000)
       cleanupMs+=performance.now()-cleanAt

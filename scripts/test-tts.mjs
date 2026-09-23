@@ -9,7 +9,7 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 
-function speakerHarness({ fish = false, kokoroFails = false } = {}) {
+function speakerHarness({ fish = false, kokoroFails = false, fishDecodeFails = false } = {}) {
   const utterances = []
   const played = []
   const audioPlayed = []
@@ -65,17 +65,29 @@ function speakerHarness({ fish = false, kokoroFails = false } = {}) {
     localStorage: { getItem: () => null },
     performance,
     AbortController,
-    fetch: async () => { fishRequests++; return { ok: false, status: 429 } },
+    fetch: async () => {
+      fishRequests++
+      if (!fishDecodeFails) return { ok: false, status: 429 }
+      return { ok: true, body: { getReader: () => {
+        let sent = false
+        return { read: async () => sent ? { done: true } : (sent = true, { done: false, value: new Uint8Array([1, 2, 3]) }) }
+      } } }
+    },
+    Blob,
     Audio: class {
       constructor(url) { this.url = url }
       play() {
         audioPlayed.push(this.url)
+        if (fishDecodeFails && this.url === 'blob:fish-test') {
+          setTimeout(() => this.onerror?.(), 1)
+          return Promise.resolve()
+        }
         setTimeout(() => { this.onplaying?.(); this.onended?.() }, 1)
         return Promise.resolve()
       }
       pause() { this.onpause?.() }
     },
-    URL: { revokeObjectURL() {} },
+    URL: { revokeObjectURL() {}, createObjectURL: () => 'blob:fish-test' },
     setTimeout, clearTimeout, setInterval, clearInterval,
     requestAnimationFrame: () => 1,
     cancelAnimationFrame() {},
@@ -130,4 +142,14 @@ test('Fish and Kokoro failures fall back to system speech', async () => {
   assert.equal(harness.fishRequests, 1)
   assert.deepEqual(harness.localSyntheses, ['All systems are ready.'])
   assert.deepEqual(harness.played, ['All systems are ready.'])
+})
+
+test('Fish decode failure falls back to Kokoro before system speech', async () => {
+  const harness = speakerHarness({ fish: true, fishDecodeFails: true })
+  const speaker = harness.createSpeaker()
+  speaker.say('The answer is ready.')
+  await speaker.end()
+  assert.equal(harness.fishRequests, 1)
+  assert.deepEqual(harness.localSyntheses, ['The answer is ready.'])
+  assert.deepEqual(harness.audioPlayed, ['blob:fish-test', 'blob:kokoro-test'])
 })

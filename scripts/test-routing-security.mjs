@@ -44,3 +44,12 @@ test('MCP tools cannot read the bridge environment file', async () => {
   assert.equal((await route('filesystem', { operation: 'read', path: '.env' })).denied, true)
   assert.equal((await route('shell', { command: 'powershell', script: 'Get-Content .env' })).denied, true)
 })
+
+test('legacy HUD panels render on the active blade surface', async () => {
+  const events = []
+  const route = createRouter({ requestApproval: async () => true, emit: (type, value) => events.push({ type, value }), request: async () => ({}) })
+  await route('hud', { kind: 'panel', value: { title: 'Status', html: '<p>Ready</p>' } })
+  const rendered = events.find((event) => event.type === 'blade')
+  assert.equal(rendered?.value.blade.kind, 'markup')
+  assert.equal(rendered?.value.blade.html, '<p>Ready</p>')
+})

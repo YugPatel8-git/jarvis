@@ -1,6 +1,6 @@
 import { BRIDGE_HTTP_URL, TTS_ENGINE } from '../config'
 import * as kokoro from './kokoro'
-import { caps } from './capabilities'
+import { caps, capabilitiesProbed } from './capabilities'
 import { takeSpeechPhrases } from './speech-phrases'
 import { toSpeechText, type SpeechContext } from './speech-text'
 
@@ -248,7 +248,9 @@ export function currentVoiceName(): string {
 export function prewarmSpeech(unlockOutput = false): void {
   pickVoice()
   if (unlockOutput) outputContext()
-  if (TTS_ENGINE === 'kokoro') void kokoro.load()
+  // Fish is primary. Loading an 86 MB fallback before the health probe wastes
+  // startup bandwidth and GPU memory on the normal path.
+  if (TTS_ENGINE === 'kokoro' && capabilitiesProbed() && caps().ttsEngine !== 'fish') void kokoro.load()
 }
 
 /** Step to the next candidate — lets you audition voices on your own machine
@@ -546,7 +548,19 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         prime(queue[0])
         if (settings.gap === 'tight') prime(queue[1])
         diag.engine = item.engine === 'fish' ? 'fish' : 'kokoro'
-        await playUrl(url, item)
+        const played = await playUrl(url, item)
+        if (!played && !cancelled && item.engine === 'fish') {
+          item.stages.fallbackStart = Math.round(performance.now() - item.queuedAt)
+          const local = await kokoro.speak(item.text).catch(() => null)
+          if (cancelled) { if (local) URL.revokeObjectURL(local); return }
+          if (local) {
+            item.engine = 'kokoro'
+            diag.engine = 'kokoro'
+            if (await playUrl(local, item)) return
+          }
+          diag.engine = 'system'
+          await speakNative(item.text, item.queuedAt, item.model)
+        }
         return
       }
 
@@ -689,7 +703,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
     })
 
   const playUrl = (url: string, item: Item) =>
-    new Promise<void>((resolve) => {
+    new Promise<boolean>((resolve) => {
       const audio = new Audio(url)
       const { text, queuedAt, model } = item
       currentAudio = audio
@@ -741,6 +755,8 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       tick()
 
       let done = false
+      let started = false
+      let failed = false
       const finish = () => {
         if (done) return
         done = true
@@ -748,12 +764,13 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         outLevel = 0.12
         URL.revokeObjectURL(url)
         if (currentAudio === audio) currentAudio = null
-        resolve()
+        resolve(started && !failed)
       }
       // Sound is genuinely coming out. This is the neural counterpart of
       // SpeechSynthesisUtterance.onstart, and it is what makes the diagnostics
       // verdict — and the T self-test — tell the truth on the premium path.
       audio.onplaying = () => {
+        started = true
         item.stages.playbackStart = Math.round(performance.now() - queuedAt)
         if (previousEnd) {
           diag.phraseGapMs = Math.round(performance.now() - previousEnd)
@@ -777,6 +794,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         // moves on. Count it rather than letting it look like nothing was said.
         diag.failures++
         diag.lastError = 'audio-element'
+        failed = true
         finish()
       }
       // The one that matters for barge-in: cancel() pauses the element, and a
@@ -787,6 +805,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       void audio.play().catch((err) => {
         diag.failures++
         diag.lastError = String((err as Error)?.name ?? 'play-rejected')
+        failed = true
         finish()
       })
     })
@@ -816,9 +835,6 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       if (cancelled) return
       cancelled = true
       buffer = ''
-      for (const item of queue) {
-        if (item.audio) void item.audio.then((url) => { if (url) URL.revokeObjectURL(url) })
-      }
       queue.length = 0
       for (const request of requests) request.abort()
       requests.clear()

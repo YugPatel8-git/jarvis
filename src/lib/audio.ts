@@ -56,21 +56,3 @@ export function micLevel(): number {
   // Voice sits low in this range; stretch it so the visuals actually move.
   return Math.min(1, avg * 3.2)
 }
-
-/** Analyser fed from an <audio> element, so the orb reacts while JARVIS talks. */
-export function attachOutputAnalyser(el: HTMLAudioElement): () => number {
-  const c = new AudioContext()
-  const src = c.createMediaElementSource(el)
-  const a = c.createAnalyser()
-  a.fftSize = 512
-  a.smoothingTimeConstant = 0.7
-  src.connect(a)
-  a.connect(c.destination)
-  const b = new Uint8Array(a.frequencyBinCount)
-  return () => {
-    a.getByteFrequencyData(b as Uint8Array<ArrayBuffer>)
-    let sum = 0
-    for (let i = 2; i < b.length; i++) sum += b[i]
-    return Math.min(1, sum / (b.length - 2) / 255 * 3)
-  }
-}

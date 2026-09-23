@@ -7,7 +7,6 @@ import { startVoice, type Voice, type VoiceMode } from './lib/voice'
 import { createSpeaker, cycleVoice, currentVoiceName, prewarmSpeech } from './lib/tts'
 import { wantsLiteralTechnicalSpeech } from './lib/speech-text'
 import * as sfx from './lib/sfx'
-import * as music from './lib/music'
 import * as hands from './lib/hands'
 import * as camera from './lib/camera'
 import * as screen from './lib/screen'
@@ -95,8 +94,6 @@ export default function App() {
     const s = store.getState()
     s.setCaption('')
     s.setActiveTool(null)
-    music.working(false)
-    music.duck(false)
     sfx.duck(false)
     s.setPhase('dormant')
     voice.current?.stop()
@@ -135,7 +132,6 @@ export default function App() {
     const spk = createSpeaker({ literalTechnical: wantsLiteralTechnicalSpeech(said) })
     speaker.current = spk
     sfx.duck(true)
-    music.duck(true)
 
     const turnId = newId()
     let started = false
@@ -162,7 +158,6 @@ export default function App() {
             // The answer arriving is what ends the tool phase — a timer would
             // clear the readout while a slow tool was still running.
             store.getState().setActiveTool(null)
-            music.working(false)
             store.getState().pushTurn({ id: turnId, role: 'jarvis', text: '' })
           }
           store.getState().appendToLastTurn(delta)
@@ -177,7 +172,6 @@ export default function App() {
           if (!started) store.getState().setPhase('tooling')
           store.getState().setActiveTool(name)
           sfx.play('tool')
-          music.working(true)
           // Tool activity makes a delayed local acknowledgement eligible.
           // The timer still skips it if real text starts first.
           toolSeen = true
@@ -203,9 +197,7 @@ export default function App() {
       if (!stale()) {
         speaker.current = null
         sfx.duck(false)
-        music.duck(false)
         store.getState().setActiveTool(null)
-        music.working(false)
         // Keep the manually opened microphone available briefly for follow-ups.
         listen(FOLLOW_UP_MS)
       }
@@ -245,9 +237,7 @@ export default function App() {
       turn.current++
       interrupt()
       store.getState().setActiveTool(null)
-      music.working(false)
       sfx.duck(false)
-      music.duck(false)
     }
     store.getState().setPhase('listening')
   }
@@ -282,7 +272,6 @@ export default function App() {
     // capability discovery can run together after that gesture.
     prewarmSpeech(true)
     void sfx.unlockAudio()
-    music.enable()
     void Promise.all([startAnalyser(), probeCapabilities()])
       .then(async () => {
         if (store.getState().phase === 'dormant') { releaseMic(); return }
@@ -413,9 +402,9 @@ export default function App() {
       s.setConnected(connectedLabels())
       s.setBridgeReady(isConnected())
     }).catch((err: Error) => s.setError(err.message))
-    void probeCapabilities().then(() => store.getState().setVoice(currentVoiceName()))
-    s.setVoice(currentVoiceName())
-    if (TTS_ENGINE === 'kokoro') {
+    void probeCapabilities().then((available) => {
+      store.getState().setVoice(currentVoiceName())
+      if (TTS_ENGINE !== 'kokoro' || available.ttsEngine === 'fish') return
       void kokoro.load()
       voicePoll.current = setInterval(() => {
         const p = kokoro.loadProgress()
@@ -428,7 +417,8 @@ export default function App() {
           store.getState().setReadinessNote('VOICE WARMING ' + Math.round(p * 100) + '%')
         }
       }, 200)
-    }
+    })
+    s.setVoice(currentVoiceName())
   }
 
   useEffect(() => {
@@ -442,6 +432,8 @@ export default function App() {
 
   useEffect(() => {
     let raf = 0
+    let lastLevel = -1
+    let lastLevelAt = 0
 
     const pump = () => {
       const st = store.getState()
@@ -451,7 +443,12 @@ export default function App() {
         st.phase === 'speaking' && speaker.current
           ? speaker.current.level()
           : micLevel()
-      st.setLevel(lvl)
+      const now = performance.now()
+      if (now - lastLevelAt >= 32 && (Math.abs(lvl - lastLevel) >= 0.015 || now - lastLevelAt >= 250)) {
+        st.setLevel(lvl)
+        lastLevel = lvl
+        lastLevelAt = now
+      }
       raf = requestAnimationFrame(pump)
     }
     pump()

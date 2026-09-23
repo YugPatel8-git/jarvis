@@ -1,4 +1,4 @@
-import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision'
+import type { HandLandmarker } from '@mediapipe/tasks-vision'
 import { OneEuroPoint } from './oneEuro'
 import { holdCamera, releaseCamera } from './camera'
 
@@ -568,6 +568,7 @@ async function ensureModel() {
   if (landmarker) return landmarker
   diag.loading = true
   try {
+    const { FilesetResolver, HandLandmarker } = await import('@mediapipe/tasks-vision')
     const vision = await FilesetResolver.forVisionTasks(WASM_BASE)
     landmarker = await HandLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
@@ -583,6 +584,7 @@ async function ensureModel() {
     // A machine with no working GPU delegate should still get hands rather than
     // an error — the CPU path is slower but perfectly usable at this frame size.
     diag.lastError = `GPU delegate failed (${(err as Error)?.message ?? err}); retrying on CPU`
+    const { FilesetResolver, HandLandmarker } = await import('@mediapipe/tasks-vision')
     const vision = await FilesetResolver.forVisionTasks(WASM_BASE)
     landmarker = await HandLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },

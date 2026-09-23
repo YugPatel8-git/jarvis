@@ -5,16 +5,13 @@
  * app makes the right noises the moment you clone it — nothing to download, no
  * licence to worry about, a few hundred bytes instead of a few megabytes.
  *
- * To use real recordings instead, drop matching files into `public/audio/`
- * (listen.mp3, tool.mp3, done.mp3, error.mp3) and they take
- * over automatically. These are interface cues; startup plays no soundtrack.
+ * These are interface cues; startup plays no soundtrack.
  */
 
 type Cue = 'listen' | 'tool' | 'done' | 'error'
 
 let ctx: AudioContext | null = null
 let master: GainNode | null = null
-const samples = new Map<Cue, AudioBuffer>()
 
 /** Where the master sits when JARVIS isn't speaking. */
 let volume = 0.5
@@ -62,25 +59,6 @@ export async function unlockAudio(): Promise<void> {
       // A refused audio unlock should not prevent manual microphone capture.
     }
   }
-  void loadOverrides()
-}
-
-/** Pick up any real audio files the user has dropped into public/audio/. */
-async function loadOverrides() {
-  const cues: Cue[] = ['listen', 'tool', 'done', 'error']
-  await Promise.all(
-    cues.map(async (cue) => {
-      if (samples.has(cue)) return
-      try {
-        const res = await fetch(`/audio/${cue}.mp3`)
-        if (!res.ok) return
-        const buf = await audio().decodeAudioData(await res.arrayBuffer())
-        samples.set(cue, buf)
-      } catch {
-        /* no override — the synthesised cue is used */
-      }
-    }),
-  )
 }
 
 export function setVolume(v: number) {
@@ -177,14 +155,6 @@ const synth: Record<Cue, () => void> = {
 export function play(cue: Cue) {
   if (!ctx || ctx.state !== 'running') return
 
-  const sample = samples.get(cue)
-  if (sample) {
-    const src = ctx.createBufferSource()
-    src.buffer = sample
-    src.connect(master!)
-    src.start()
-    return
-  }
   synth[cue]()
 }
 

@@ -41,8 +41,17 @@ export function classify(tool, a = {}) {
   if (/password|credential|seed phrase|recovery code|private key/i.test(text)) return risk('Handle authentication material', 'Credentials or private authentication data', 'Sensitive values must not be exposed or entered without permission', false)
   return { classification: NORMAL }
 }
+let auditDirectoryReady = null
 export async function audit(entry) {
   const file = resolve('logs','tool-audit.jsonl')
-  await mkdir(dirname(file), { recursive: true })
-  await appendFile(file, JSON.stringify(redact({ timestamp: new Date().toISOString(), ...entry }))+'\n', { encoding:'utf8', mode:0o600 })
+  auditDirectoryReady ??= mkdir(dirname(file), { recursive: true })
+  await auditDirectoryReady
+  try {
+    await appendFile(file, JSON.stringify(redact({ timestamp: new Date().toISOString(), ...entry }))+'\n', { encoding:'utf8', mode:0o600 })
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+    auditDirectoryReady = mkdir(dirname(file), { recursive: true })
+    await auditDirectoryReady
+    await appendFile(file, JSON.stringify(redact({ timestamp: new Date().toISOString(), ...entry }))+'\n', { encoding:'utf8', mode:0o600 })
+  }
 }

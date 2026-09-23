@@ -42,16 +42,17 @@ export class CodexAppServerConversation {
     this.onState = onState ?? (() => {})
     this.onRouting = onRouting ?? (() => {})
     this.child = null; this.pending = new Map(); this.requestId = 0
-    this.threadId = null; this.turnId = null; this.active = null; this.starting = null
-    this.interrupting = null
+    this.threadId = null; this.turnId = null; this.active = null; this.starting = null; this.queuedAsk = null
+    this.interrupting = null; this.nextWarmAt = 0
     this.state = 'warming'; this.model = MODEL; this.supportedEfforts = []
     this.turns = 0; this.contextChars = 0; this.recent = []
     this.fallback = new ExecFallback({ cwd, onText, onTool, routerToken })
   }
-  get busy() { return Boolean(this.starting) || Boolean(this.active) || Boolean(this.fallback.child) }
+  get busy() { return Boolean(this.queuedAsk) || Boolean(this.active) || Boolean(this.fallback.child) }
   warm() {
     if (this.child && this.state === 'ready') return Promise.resolve()
-    if (!this.starting) this.starting = this.#start().catch((err) => { this.#stopProcess(); throw err }).finally(() => { this.starting = null })
+    if (this.state === 'fallback' && Date.now() < this.nextWarmAt) return Promise.reject(new Error('Codex app-server retry is cooling down'))
+    if (!this.starting) this.starting = this.#start().catch((err) => { this.#stopProcess(); this.state = 'fallback'; this.nextWarmAt = Date.now() + 30_000; this.onState('fallback'); throw err }).finally(() => { this.starting = null })
     return this.starting
   }
   async #start() {
@@ -99,15 +100,20 @@ export class CodexAppServerConversation {
   }
   async ask(prompt) {
     if (this.busy) throw new Error('Codex is already answering')
+    const queued = { cancelled: false }
+    this.queuedAsk = queued
+    try {
     const start = performance.now()
-    try { await this.warm() } catch { this.state = 'fallback'; this.onState('fallback'); return this.fallback.ask(prompt) }
+    try { await this.warm() } catch { if (queued.cancelled) return ''; this.state = 'fallback'; this.onState('fallback'); return this.fallback.ask(prompt) }
+    if (queued.cancelled) return ''
     if (this.interrupting) { await this.interrupting; this.interrupting = null }
     if (this.turns >= MAX_SESSION_TURNS || this.contextChars + prompt.length > MAX_SESSION_CHARS) {
       this.threadId = null; this.turns = 0; this.contextChars = 0; await this.#openThread(false)
     }
+    if (queued.cancelled) return ''
     const active = { prompt, answer: '', resolve: null, reject: null, start, firstEvent: false, firstText: false, timer: null }
     const completion = new Promise((resolve, reject) => { active.resolve = resolve; active.reject = reject })
-    this.active = active; active.timer = setTimeout(() => this.cancel(), TURN_TIMEOUT_MS)
+    this.active = active; this.queuedAsk = null; active.timer = setTimeout(() => this.cancel(), TURN_TIMEOUT_MS)
     this.onTiming('bridgePromptProcessingMs', performance.now() - start)
     try {
       const submitted = performance.now()
@@ -121,6 +127,7 @@ export class CodexAppServerConversation {
       if (!active.answer && !this.child) { this.state = 'fallback'; this.onState('fallback'); return this.fallback.ask(prompt) }
       throw err
     }
+    } finally { if (this.queuedAsk === queued) this.queuedAsk = null }
   }
   #line(line) {
     if (!line.trim()) return
@@ -128,6 +135,7 @@ export class CodexAppServerConversation {
     if (Object.hasOwn(msg, 'id') && !msg.method) {
       const pending = this.pending.get(msg.id); if (!pending) return
       this.pending.delete(msg.id)
+      clearTimeout(pending.timer)
       if (msg.error) pending.reject(new Error(msg.error.message ?? 'Codex app-server request failed')); else pending.resolve(msg.result)
       return
     }
@@ -156,7 +164,11 @@ export class CodexAppServerConversation {
   }
   #request(method, params) {
     const id = ++this.requestId
-    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.#write({ method, id, params }) })
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Codex app-server ${method} timed out`)) }, 15_000)
+      this.pending.set(id, { resolve, reject, timer })
+      try { this.#write({ method, id, params }) } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error) }
+    })
   }
   #notify(method, params) { this.#write({ method, params }) }
   #write(message) {
@@ -166,7 +178,7 @@ export class CodexAppServerConversation {
   #died(err) {
     if (!this.child) return
     this.child = null; this.state = 'warming'; this.onState('warming')
-    for (const pending of this.pending.values()) pending.reject(err)
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(err) }
     this.pending.clear(); if (this.active) this.#finish(err)
   }
   #stopProcess() {
@@ -174,8 +186,11 @@ export class CodexAppServerConversation {
     const child = this.child; this.child = null
     try { child.stdin.end() } catch {}
     child.kill('SIGTERM')
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error('Codex app-server stopped')) }
+    this.pending.clear()
   }
   cancel() {
+    if (this.queuedAsk) { this.queuedAsk.cancelled = true; this.queuedAsk = null }
     if (this.fallback.child) return this.fallback.cancel()
     if (!this.active) return
     const active = this.active, turnId = this.turnId
