@@ -14,7 +14,7 @@ const RECENT_TURNS = 6
 const RECENT_CHARS = 6_000
 const DISABLED_FEATURES = ['plugins', 'apps', 'browser_use', 'computer_use', 'image_generation', 'multi_agent', 'shell_tool', 'skill_search', 'tool_suggest', 'web_search_request']
 const PERSONA = `You are JARVIS, a capable, composed, conversational personal AI assistant speaking aloud to one person. Address the user as "sir" naturally in about half of replies; vary its placement and never force it into every sentence. Give the useful answer first. Routine actions take one or two natural sentences, simple questions two to four, and technical answers three to six when useful. Avoid robotic one-word answers, canned acknowledgements, customer-service language, and repetition. In casual contexts, add dry British wit, subtle sarcasm, playful observations, or gentle teasing when it fits, roughly one reply in three. Never force a joke, insult the user, or obscure an error. For emergencies, safety, medical, financial, security, destructive, high-risk, sensitive, or academic-integrity matters, drop humor and respond calmly and directly. Match ordinary user slang or profanity without scolding or injecting your own. Use plain spoken prose: no markdown, headings, bullets, code fences, URLs, raw JSON, or emoji. Answer repeated questions directly. Do not claim to have used tools.
-Your only machine capabilities are the tools from the jarvis MCP server. When asked about the current webpage, use its browser read tool before answering. Call tools without narrating progress; answer when results are ready. Never bypass that server with built-in shell or filesystem tools. The Codex sandbox is read-only. The router executes normal actions and pauses high-risk actions for explicit user approval. Do not claim success until a tool returns success. Use camera vision only when asked. Never request an API key or expose authentication data.`
+Your only machine capabilities are the tools from the jarvis MCP server. When asked about the current webpage, use its browser read tool before answering. If a site needs sign-in, let the user use the existing browser session or password manager; never request or handle passwords. Call tools without narrating progress; answer when results are ready. Never bypass that server with built-in shell or filesystem tools. The Codex sandbox is read-only. The router executes normal actions and pauses high-risk actions for explicit user approval. Do not claim success until a tool returns success. Use camera vision only when asked. Never request an API key or expose authentication data.`
 
 function commandFor(args) {
   if (process.platform !== 'win32') return { command: 'codex', args }
@@ -36,14 +36,16 @@ function safeEnv(routerToken) {
 }
 
 export class CodexAppServerConversation {
-  constructor({ cwd, onText, onTool, onTiming, onState, onRouting, routerToken }) {
+  constructor({ cwd, onText, onTool, onTiming, onState, onRouting, onFailure, routerToken, spawnProcess = spawn }) {
     Object.assign(this, { cwd, onText, onTool, routerToken })
     this.onTiming = onTiming ?? (() => {})
     this.onState = onState ?? (() => {})
     this.onRouting = onRouting ?? (() => {})
+    this.onFailure = onFailure ?? (() => {})
+    this.spawnProcess = spawnProcess
     this.child = null; this.pending = new Map(); this.requestId = 0
     this.threadId = null; this.turnId = null; this.active = null; this.starting = null; this.queuedAsk = null
-    this.interrupting = null; this.nextWarmAt = 0
+    this.interrupting = null; this.nextWarmAt = 0; this.restartAttempts = 0; this.restartTimer = null; this.readyAt = 0; this.closing = false
     this.state = 'warming'; this.model = MODEL; this.supportedEfforts = []
     this.turns = 0; this.contextChars = 0; this.recent = []
     this.fallback = new ExecFallback({ cwd, onText, onTool, routerToken })
@@ -52,18 +54,18 @@ export class CodexAppServerConversation {
   warm() {
     if (this.child && this.state === 'ready') return Promise.resolve()
     if (this.state === 'fallback' && Date.now() < this.nextWarmAt) return Promise.reject(new Error('Codex app-server retry is cooling down'))
-    if (!this.starting) this.starting = this.#start().catch((err) => { this.#stopProcess(); this.state = 'fallback'; this.nextWarmAt = Date.now() + 30_000; this.onState('fallback'); throw err }).finally(() => { this.starting = null })
+    if (!this.starting) this.starting = this.#start().catch((err) => { if(this.child)this.onFailure('start-failed');this.#stopProcess(); this.state = 'fallback'; this.nextWarmAt = Date.now() + 30_000; this.onState('fallback'); throw err }).finally(() => { this.starting = null })
     return this.starting
   }
   async #start() {
     this.state = 'warming'; this.onState('warming')
     const began = performance.now()
     const invocation = commandFor(['-c', 'mcp_servers={}', ...DISABLED_FEATURES.flatMap((name) => ['--disable', name]), 'app-server', '--stdio'])
-    const child = spawn(invocation.command, invocation.args, { cwd: this.cwd, env: safeEnv(this.routerToken), shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = this.spawnProcess(invocation.command, invocation.args, { cwd: this.cwd, env: safeEnv(this.routerToken), shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.onTiming('processSpawnReturnMs', performance.now() - began)
-    this.child = child; this.stderr = ''
-    child.stderr.on('data', (chunk) => { this.stderr = (this.stderr + chunk).slice(-8000) })
-    child.once('exit', (code) => this.#died(new Error(`Codex app-server exited (${code}): ${this.stderr.trim()}`)))
+    this.child = child
+    child.stderr.resume()
+    child.once('exit', (code) => this.#died(new Error(`Codex app-server exited (${code}).`)))
     child.once('error', (err) => this.#died(err))
     createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) => this.#line(line))
     await this.#request('initialize', { clientInfo: { name: 'jarvis_local', title: 'JARVIS Local Bridge', version: '1.0.0' } })
@@ -78,9 +80,14 @@ export class CodexAppServerConversation {
       this.onTiming('modelCatalogMs', performance.now() - catalogAt)
     } catch { /* optional metadata */ }
     const resuming = Boolean(this.threadId), threadAt = performance.now()
-    await this.#openThread(resuming)
+    try { await this.#openThread(resuming) }
+    catch (error) {
+      if (!resuming) throw error
+      this.threadId = null
+      await this.#openThread(false)
+    }
     this.onTiming(resuming ? 'threadResumeMs' : 'threadStartMs', performance.now() - threadAt)
-    this.state = 'ready'; this.onState('ready'); this.onTiming('prewarmTotalMs', performance.now() - began)
+    this.state = 'ready'; this.readyAt = Date.now(); this.onState('ready'); this.onTiming('prewarmTotalMs', performance.now() - began)
   }
   async #openThread(resume = false) {
     const config = { mcp_servers: { jarvis: { command: process.execPath, args: [mcpPath()], env_vars: ['JARVIS_ROUTER_TOKEN', 'JARVIS_BRIDGE_PORT'], required: true, default_tools_approval_mode: 'approve' } }, features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])) }
@@ -113,7 +120,12 @@ export class CodexAppServerConversation {
     if (queued.cancelled) return ''
     const active = { prompt, answer: '', resolve: null, reject: null, start, firstEvent: false, firstText: false, timer: null }
     const completion = new Promise((resolve, reject) => { active.resolve = resolve; active.reject = reject })
-    this.active = active; this.queuedAsk = null; active.timer = setTimeout(() => this.cancel(), TURN_TIMEOUT_MS)
+    this.active = active; this.queuedAsk = null; active.timer = setTimeout(() => {
+      this.onFailure('turn-timeout')
+      this.cancel(new Error('Codex timed out, sir. I stopped that turn.'))
+      this.#stopProcess()
+      this.state = 'fallback'; this.nextWarmAt = Date.now() + 30_000; this.onState('fallback')
+    }, TURN_TIMEOUT_MS)
     this.onTiming('bridgePromptProcessingMs', performance.now() - start)
     try {
       const submitted = performance.now()
@@ -165,7 +177,15 @@ export class CodexAppServerConversation {
   #request(method, params) {
     const id = ++this.requestId
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Codex app-server ${method} timed out`)) }, 15_000)
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        if (method !== 'model/list' && method !== 'turn/interrupt') {
+          this.onFailure('turn-timeout')
+          this.#stopProcess()
+          this.state = 'fallback'; this.nextWarmAt = Date.now() + 30_000; this.onState('fallback')
+        }
+        reject(new Error(`Codex app-server ${method} timed out`))
+      }, 15_000)
       this.pending.set(id, { resolve, reject, timer })
       try { this.#write({ method, id, params }) } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error) }
     })
@@ -177,9 +197,18 @@ export class CodexAppServerConversation {
   }
   #died(err) {
     if (!this.child) return
+    const wasReady = this.state === 'ready'
+    if (wasReady && Date.now() - this.readyAt > 60_000) this.restartAttempts = 0
     this.child = null; this.state = 'warming'; this.onState('warming')
+    this.onFailure('process-exit')
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(err) }
     this.pending.clear(); if (this.active) this.#finish(err)
+    if (wasReady && !this.closing && this.restartAttempts < 2) {
+      const delay = [500, 2000][this.restartAttempts++]
+      clearTimeout(this.restartTimer)
+      this.restartTimer = setTimeout(() => { this.restartTimer = null; void this.warm().catch(() => {}) }, delay)
+      this.restartTimer.unref?.()
+    }
   }
   #stopProcess() {
     if (!this.child) return
@@ -189,15 +218,16 @@ export class CodexAppServerConversation {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error('Codex app-server stopped')) }
     this.pending.clear()
   }
-  cancel() {
+  cancel(error = null) {
     if (this.queuedAsk) { this.queuedAsk.cancelled = true; this.queuedAsk = null }
     if (this.fallback.child) return this.fallback.cancel()
     if (!this.active) return
     const active = this.active, turnId = this.turnId
-    this.active = null; clearTimeout(active.timer); active.resolve(active.answer.trim())
+    this.active = null; clearTimeout(active.timer); if(error)active.reject(error);else active.resolve(active.answer.trim())
     if (this.child && this.threadId && turnId) this.interrupting = this.#request('turn/interrupt', { threadId: this.threadId, turnId }).catch(() => {})
   }
   close() {
+    this.closing = true; clearTimeout(this.restartTimer)
     this.cancel(); this.fallback.close()
     this.#stopProcess()
   }

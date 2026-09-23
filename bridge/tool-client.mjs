@@ -47,11 +47,14 @@ async function connect() {
       if (message.error) request.reject(new Error(message.error)); else request.resolve(message.result)
       idleClose()
     })
-    ws.on('error', (error) => { fail(error); failAll(error) })
+    ws.on('error', (error) => {
+      fail(error)
+      if (socket === ws) { socket = null; failAll(error) }
+      ws.terminate()
+    })
     ws.on('close', () => {
-      if (socket === ws) socket = null
       fail(new Error('Tool router disconnected.'))
-      failAll(new Error('Tool router disconnected.'))
+      if (socket === ws) { socket = null; failAll(new Error('Tool router disconnected.')) }
     })
   })
   return connecting

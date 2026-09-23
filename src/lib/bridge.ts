@@ -1,6 +1,7 @@
 import type { AskHandlers } from './brain'
 import type { Blade, Panel } from '../store'
 import { BRIDGE_WS_URL } from '../config'
+import * as kokoro from './kokoro'
 
 /**
  * Client for the local bridge (see bridge/server.mjs).
@@ -41,6 +42,17 @@ type Frame = {
   state?: string
   metric?: string
   ms?: number
+  diagnostics?: boolean
+}
+
+function localVoiceDiagnostics(): string {
+  const value = (window as unknown as { __tts?: Record<string, unknown> }).__tts
+  if (!value) return ' Voice output has not been initialized in this page.'
+  const engine = ['fish', 'kokoro', 'system'].includes(String(value.engine)) ? String(value.engine) : 'unknown'
+  const count = (key: string) => Number.isFinite(value[key]) ? Math.max(0, Math.min(999, Number(value[key]))) : 0
+  const local = `Kokoro ${kokoro.isReady() ? 'ready' : kokoro.isUnavailable() ? 'unavailable' : 'not loaded'}; system voice ${typeof speechSynthesis === 'undefined' ? 'unavailable' : 'available'}`
+  if (count('spoken') === 0) return ` Voice playback has not been exercised in this page; ${count('queueDepth')} phrases are queued. ${local}.`
+  return ` Voice output: ${engine}; ${count('queueDepth')} phrases queued, ${count('pendingFish')} Fish requests pending, ${count('playbackTimeouts')} playback timeouts. ${local}.`
 }
 
 /** Every question gets an id so its answer can be told from anyone else's. */
@@ -122,6 +134,8 @@ export function watchUi(fn: (op: string, args: any) => void) {
  */
 export type ConnectionState = 'open' | 'lost' | 'reconnected'
 let onConnection: ((state: ConnectionState) => void) | null = null
+let onHealthNotice: ((text: string) => void) | null = null
+export function watchHealthNotice(fn: (text: string) => void) { onHealthNotice = fn }
 export function watchConnection(fn: (state: ConnectionState) => void) {
   onConnection = fn
 }
@@ -154,6 +168,7 @@ let everConnected = false
 const RECONNECT_DELAYS = [500, 1000, 2000, 4000, 8000, 8000]
 let attempt = 0
 let reconnectTimer = 0
+let stableTimer = 0
 
 function scheduleReconnect() {
   if (attempt >= RECONNECT_DELAYS.length) return
@@ -229,6 +244,8 @@ function dispatch(ws: WebSocket) {
       // A `ui` frame with no args is normal — reset and clear take none — so an
       // absent args object is an empty one, not a reason to drop the command.
       onUi?.(msg.op, (msg.args ?? {}) as Record<string, unknown>)
+    } else if (msg.type === 'health-notice' && msg.text) {
+      onHealthNotice?.(msg.text)
     }
   })
 }
@@ -254,7 +271,7 @@ function connect(): Promise<WebSocket> {
       settled = true
       clearTimeout(timer)
       connecting = null
-      if (err) reject(err)
+      if (err) { if (!everConnected) scheduleReconnect(); reject(err) }
       else resolve(ws)
     }
 
@@ -266,7 +283,8 @@ function connect(): Promise<WebSocket> {
     ws.onopen = () => {
       socket = ws
       ws.send(JSON.stringify({ type: 'screen-status', sharing: screenSharing }))
-      attempt = 0
+      clearTimeout(stableTimer)
+      stableTimer = window.setTimeout(() => { if (socket === ws) attempt = 0 }, 30_000)
       dispatch(ws)
       settle(null)
       onConnection?.(everConnected ? 'reconnected' : 'open')
@@ -296,6 +314,7 @@ function connect(): Promise<WebSocket> {
       )
     }
     ws.onclose = () => {
+      clearTimeout(stableTimer)
       // A close before open is just a failed dial; after open it's a lost
       // session, and the two want different handling.
       settle(new Error('The bridge closed the connection.'))
@@ -453,8 +472,11 @@ export async function ask(
       try {
         switch (msg.type) {
           case 'text':
-            text += msg.delta ?? ''
-            handlers.onText(msg.delta ?? '')
+            {
+              const delta = (msg.delta ?? '') + (msg.diagnostics ? localVoiceDiagnostics() : '')
+              text += delta
+              handlers.onText(delta)
+            }
             break
 
           case 'tool':

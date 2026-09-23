@@ -22,6 +22,7 @@ import {
   watchCapture,
   watchUi,
   watchConnection,
+  watchHealthNotice,
   connectedLabels,
   isConnected,
   type Msg,
@@ -384,20 +385,26 @@ export default function App() {
           console.warn('[jarvis] unknown ui op:', op, args)
       }
     })
-    // In bridge mode the conversation lives in the agent session, which is tied
-    // to the socket — so a drop silently wipes his memory while the transcript
-    // on screen still shows it. Better to say so than to let him quietly forget.
+    const showTransient = (text: string) => {
+      store.getState().setError(text)
+      setTimeout(() => { if (store.getState().error === text) store.getState().setError(null) }, 7000)
+    }
+    let connectionLostAt = 0
+    let connectionAffectedTurn = false
     watchConnection((state) => {
       if (state === 'lost') {
         store.getState().setBridgeReady(false)
-        store.getState().setError('Bridge connection lost — reconnecting.')
+        connectionLostAt = Date.now()
+        connectionAffectedTurn = ['thinking', 'tooling', 'speaking'].includes(store.getState().phase)
+        if (connectionAffectedTurn) showTransient('Bridge connection lost — reconnecting.')
       } else if (state === 'reconnected') {
         store.getState().setBridgeReady(true)
-        store
-          .getState()
-          .setError('Bridge reconnected. The previous conversation was not kept.')
+        if (connectionAffectedTurn || (connectionLostAt && Date.now() - connectionLostAt > 3000)) showTransient('Bridge reconnected, sir.')
+        connectionLostAt = 0
+        connectionAffectedTurn = false
       }
     })
+    watchHealthNotice(showTransient)
     void warm().then(() => {
       s.setConnected(connectedLabels())
       s.setBridgeReady(isConnected())

@@ -89,6 +89,9 @@ export const diag = {
   stages: {} as Record<string, number>,
   phraseGapMs: 0,
   phraseGapsMs: [] as number[],
+  queueDepth: 0,
+  pendingFish: 0,
+  playbackTimeouts: 0,
 }
 
 export type VoiceSettings = { volume: number; clarity: 'off' | 'low' | 'medium'; gap: 'tight' | 'natural' }
@@ -397,6 +400,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       mark('firstPhraseMs')
       queue.push(item)
     }
+    diag.queueDepth = queue.length
     // If phrase one is already playing, prepare phrase two immediately.
     // The pump still owns playback order, so there can be no overlap.
     if (playingAudio && queue.length <= (settings.gap === 'tight' ? 2 : 1)) prime(item)
@@ -411,6 +415,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       const controller = new AbortController()
       let streaming = false
       requests.add(controller)
+      diag.pendingFish = requests.size
       item.engine = 'fish'
       item.stages.requestStart = Math.round(performance.now() - item.queuedAt)
       return fetch(`${BRIDGE_HTTP_URL}/tts`, {
@@ -462,7 +467,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
               diag.stages = { ...item.stages }
               ended = true; append()
             } catch { if (media.readyState === 'open') media.endOfStream('network') }
-            finally { requests.delete(controller) }
+            finally { requests.delete(controller); diag.pendingFish = requests.size }
           })()
           diag.stages = { ...item.stages }
           if (item.model) mark('firstAudioReadyMs')
@@ -488,7 +493,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (item.model) mark('firstAudioReadyMs')
         diag.stages = { ...item.stages }
         return URL.createObjectURL(blob)
-      }).catch(() => null).finally(() => { if (!streaming) requests.delete(controller) })
+      }).catch(() => null).finally(() => { if (!streaming) { requests.delete(controller); diag.pendingFish = requests.size } })
         .then(async (url) => {
           if (url) return url
           if (cancelled || kokoro.isUnavailable()) return null
@@ -525,6 +530,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       for (;;) {
         if (cancelled) break
         const item = queue.shift()
+        diag.queueDepth = queue.length
         if (!item) break
 
         prime(item)
@@ -549,14 +555,16 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (settings.gap === 'tight') prime(queue[1])
         diag.engine = item.engine === 'fish' ? 'fish' : 'kokoro'
         const played = await playUrl(url, item)
-        if (!played && !cancelled && item.engine === 'fish') {
-          item.stages.fallbackStart = Math.round(performance.now() - item.queuedAt)
-          const local = await kokoro.speak(item.text).catch(() => null)
-          if (cancelled) { if (local) URL.revokeObjectURL(local); return }
-          if (local) {
-            item.engine = 'kokoro'
-            diag.engine = 'kokoro'
-            if (await playUrl(local, item)) return
+        if (!played && !cancelled) {
+          if (item.engine === 'fish') {
+            item.stages.fallbackStart = Math.round(performance.now() - item.queuedAt)
+            const local = await kokoro.speak(item.text).catch(() => null)
+            if (cancelled) { if (local) URL.revokeObjectURL(local); return }
+            if (local) {
+              item.engine = 'kokoro'
+              diag.engine = 'kokoro'
+              if (await playUrl(local, item)) return
+            }
           }
           diag.engine = 'system'
           await speakNative(item.text, item.queuedAt, item.model)
@@ -757,9 +765,18 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       let done = false
       let started = false
       let failed = false
+      const watchdog = setTimeout(() => {
+        diag.failures++
+        diag.playbackTimeouts++
+        diag.lastError = 'playback-timeout'
+        failed = true
+        audio.pause()
+        finish()
+      }, 45_000)
       const finish = () => {
         if (done) return
         done = true
+        clearTimeout(watchdog)
         cancelAnimationFrame(raf)
         outLevel = 0.12
         URL.revokeObjectURL(url)
@@ -836,8 +853,10 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       cancelled = true
       buffer = ''
       queue.length = 0
+      diag.queueDepth = 0
       for (const request of requests) request.abort()
       requests.clear()
+      diag.pendingFish = 0
       // Keep the echo tail: the words already in the air still have to be
       // recognised and discarded, even though he has stopped adding to them.
       setSpeaking('')

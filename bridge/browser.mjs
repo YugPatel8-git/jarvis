@@ -9,6 +9,8 @@ const PORT = Number(process.env.JARVIS_CHROME_PORT ?? 9223)
 const profile = resolve('.jarvis','chrome-profile')
 const candidates = [process.env.JARVIS_CHROME_PATH, process.env.ProgramFiles && resolve(process.env.ProgramFiles,'Google/Chrome/Application/chrome.exe'), process.env['ProgramFiles(x86)'] && resolve(process.env['ProgramFiles(x86)'],'Google/Chrome/Application/chrome.exe'), process.env.LOCALAPPDATA && resolve(process.env.LOCALAPPDATA,'Google/Chrome/Application/chrome.exe')].filter(Boolean)
 let cdpSeq = 0
+let launching = null
+let launchRetryAt = 0
 const wait = (ms) => new Promise((r) => setTimeout(r,ms))
 async function api(path='/json') {
   const r = await fetch(`http://127.0.0.1:${PORT}${path}`, { signal:AbortSignal.timeout(2500) })
@@ -17,11 +19,18 @@ async function api(path='/json') {
 }
 async function ensure(url='about:blank') {
   try { await api('/json/version'); return } catch {}
+  if (launching) return launching
+  if (Date.now() < launchRetryAt) throw new Error('Chrome automation is cooling down after a failed connection.')
   const exe=candidates.find(existsSync)
   if (!exe) throw new Error('Google Chrome was not found. Set JARVIS_CHROME_PATH.')
-  spawn(exe,[`--remote-debugging-port=${PORT}`,`--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check',url],{detached:true,stdio:'ignore',windowsHide:false}).unref()
-  for(let i=0;i<20;i++){ await wait(150); try { await api('/json/version'); return } catch {} }
-  throw new Error('Chrome local automation endpoint did not start.')
+  launching=(async()=>{
+    const child=spawn(exe,[`--remote-debugging-port=${PORT}`,`--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check',url],{detached:true,stdio:'ignore',windowsHide:false})
+    child.on('error',()=>{})
+    child.unref()
+    for(let i=0;i<20;i++){ await wait(150); try { await api('/json/version'); return } catch {} }
+    throw new Error('Chrome local automation endpoint did not start.')
+  })()
+  try{return await launching}catch(error){launchRetryAt=Date.now()+30_000;throw error}finally{launching=null}
 }
 async function tabs(ready=false){ if(!ready)await ensure(); return (await api('/json')).filter((t)=>t.type==='page') }
 async function cdp(target,method,params={}) {
@@ -109,12 +118,14 @@ export async function browserAction(a) {
       }
       const cleanAt=performance.now(),text=lines.join('\\n').slice(0,18000)
       cleanupMs+=performance.now()-cleanAt
-      return {text,extractionMs:performance.now()-began-cleanupMs,cleanupMs}
+      const login=document.querySelector('input[type="password"]')
+      const authenticationRequired=Boolean(login&&login.getClientRects().length)
+      return {text,authenticationRequired,extractionMs:performance.now()-began-cleanupMs,cleanupMs}
     })()`
     const cdpStarted=performance.now()
     const r=await cdp(t,'Runtime.evaluate',{expression,returnByValue:true})
     const value=r.result?.value??{text:'',extractionMs:0,cleanupMs:0}
-    return {title:t.title,url:t.url,text:value.text,timings:{browserToolMs:performance.now()-operationStarted,roundTripMs:performance.now()-cdpStarted,extractionMs:value.extractionMs,cleanupMs:value.cleanupMs}}
+    return {title:t.title,url:t.url,text:value.text,authenticationRequired:Boolean(value.authenticationRequired),timings:{browserToolMs:performance.now()-operationStarted,roundTripMs:performance.now()-cdpStarted,extractionMs:value.extractionMs,cleanupMs:value.cleanupMs}}
   }
   if(op==='click'){const sel=JSON.stringify(String(a.selector??''));const r=await cdp(t,'Runtime.evaluate',{expression:`(()=>{const e=document.querySelector(${sel});if(!e)return "not found";e.click();return "clicked"})()`,returnByValue:true});return {result:r.result?.value}}
   if(op==='type'){const sel=JSON.stringify(String(a.selector??'')),val=JSON.stringify(String(a.value??''));const r=await cdp(t,'Runtime.evaluate',{expression:`(()=>{const e=document.querySelector(${sel});if(!e)return "not found";e.focus();e.value=${val};e.dispatchEvent(new Event("input",{bubbles:true}));e.dispatchEvent(new Event("change",{bubbles:true}));return "entered"})()`,returnByValue:true});return {result:r.result?.value}}

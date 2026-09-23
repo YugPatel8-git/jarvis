@@ -56,7 +56,7 @@ async function filesystem(a){
   throw new Error(`Unsupported filesystem operation: ${op}`)
 }
 
-export function createRouter({requestApproval,emit,request}){
+export function createRouter({requestApproval,emit,request,onOutcome=()=>{}}){
   let hudSeq = 0
   return async function route(tool,args={},traceAsk=undefined){
     const started=performance.now()
@@ -100,9 +100,11 @@ export function createRouter({requestApproval,emit,request}){
       const operationMs=performance.now()-actionStarted
       await audit({tool,classification:policy.classification,approvalRequested:policy.classification===HIGH_RISK,approved,success:true})
       emit('tool-timing',{tool,ask:traceAsk,operation:args.operation??null,auditStartMs:Number(auditStartMs.toFixed(2)),operationMs:Number(operationMs.toFixed(2)),auditFinishMs:Number((performance.now()-actionStarted-operationMs).toFixed(2)),routerTotalMs:Number((performance.now()-started).toFixed(2))})
+      onOutcome(tool,true,performance.now()-started)
       return result
     }catch(err){
       await audit({tool,classification:policy.classification,approvalRequested:policy.classification===HIGH_RISK,approved,success:false,error:String(err?.message??err)})
+      onOutcome(tool,false,performance.now()-started)
       throw err
     }
   }
