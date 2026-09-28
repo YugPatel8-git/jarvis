@@ -48,7 +48,7 @@ async function filesystem(a){
   }
   if(op==='list')return {path:p,entries:await readdir(p,{withFileTypes:true}).then(xs=>xs.slice(0,1000).map(x=>({name:x.name,type:x.isDirectory()?'directory':'file'})))}
   if(op==='stat'){const s=await stat(p);return {path:p,size:s.size,directory:s.isDirectory(),modified:s.mtime.toISOString()}}
-  if(op==='open'){await stat(p);await runFile('explorer.exe',[p],{timeout:10000,windowsHide:false,shell:false});return {opened:p}}
+  if(op==='open'){await stat(p);await runFile('explorer.exe',[p],{timeout:10000,windowsHide:true,shell:false});return {opened:p}}
   if(op==='mkdir'){await mkdir(p,{recursive:true});return {created:p}}
   if(op==='write'){await mkdir(dirname(p),{recursive:true});await writeFile(p,String(a.content??''),{encoding:'utf8',flag:a.overwrite?'w':'wx'});return {written:p}}
   if(op==='move'){const d=resolve(String(a.destination));await mkdir(dirname(d),{recursive:true});if(!a.overwrite)await stat(d).then(()=>{throw new Error('Destination exists.')},()=>{});await rename(p,d);return {moved:p,destination:d}}

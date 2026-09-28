@@ -3,12 +3,12 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import process from 'node:process'
 import { performance } from 'node:perf_hooks'
-import { WebSocket } from 'ws'
+import { createCdpPool } from './cdp.mjs'
 
 const PORT = Number(process.env.JARVIS_CHROME_PORT ?? 9223)
 const profile = resolve('.jarvis','chrome-profile')
 const candidates = [process.env.JARVIS_CHROME_PATH, process.env.ProgramFiles && resolve(process.env.ProgramFiles,'Google/Chrome/Application/chrome.exe'), process.env['ProgramFiles(x86)'] && resolve(process.env['ProgramFiles(x86)'],'Google/Chrome/Application/chrome.exe'), process.env.LOCALAPPDATA && resolve(process.env.LOCALAPPDATA,'Google/Chrome/Application/chrome.exe')].filter(Boolean)
-let cdpSeq = 0
+const cdpPool = createCdpPool()
 let launching = null
 let launchRetryAt = 0
 const wait = (ms) => new Promise((r) => setTimeout(r,ms))
@@ -24,7 +24,7 @@ async function ensure(url='about:blank') {
   const exe=candidates.find(existsSync)
   if (!exe) throw new Error('Google Chrome was not found. Set JARVIS_CHROME_PATH.')
   launching=(async()=>{
-    const child=spawn(exe,[`--remote-debugging-port=${PORT}`,`--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check',url],{detached:true,stdio:'ignore',windowsHide:false})
+    const child=spawn(exe,[`--remote-debugging-port=${PORT}`,`--user-data-dir=${profile}`,'--no-first-run','--no-default-browser-check',url],{detached:true,stdio:'ignore',windowsHide:true})
     child.on('error',()=>{})
     child.unref()
     for(let i=0;i<20;i++){ await wait(150); try { await api('/json/version'); return } catch {} }
@@ -32,18 +32,14 @@ async function ensure(url='about:blank') {
   })()
   try{return await launching}catch(error){launchRetryAt=Date.now()+30_000;throw error}finally{launching=null}
 }
-async function tabs(ready=false){ if(!ready)await ensure(); return (await api('/json')).filter((t)=>t.type==='page') }
+async function tabs(ready=false){
+  let list
+  try { list = await api('/json') }
+  catch (error) { if (ready) throw error; await ensure(); list = await api('/json') }
+  return list.filter((t)=>t.type==='page')
+}
 async function cdp(target,method,params={}) {
-  return new Promise((ok,no)=>{
-    // CDP request ids are protocol integers. Epoch milliseconds exceed the
-    // 32-bit range accepted by current Chrome builds and receive no response.
-    const ws=new WebSocket(target.webSocketDebuggerUrl), id=++cdpSeq
-    const finish=(error,result)=>{clearTimeout(timer);ws.close();if(error)no(error);else ok(result)}
-    const timer=setTimeout(()=>finish(new Error('Chrome operation timed out')),10000)
-    ws.on('open',()=>ws.send(JSON.stringify({id,method,params})))
-    ws.on('message',(raw)=>{let m;try{m=JSON.parse(raw)}catch{return}if(m.id!==id)return;finish(m.error?new Error(m.error.message):null,m.result)})
-    ws.on('error',(error)=>finish(error))
-  })
+  return cdpPool.request(target,method,params)
 }
 function url(raw){const u=new URL(String(raw));if(!['http:','https:'].includes(u.protocol))throw new Error('Only http(s) navigation is allowed.');return u.href}
 export async function browserAction(a) {

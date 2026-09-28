@@ -130,6 +130,7 @@ async function fishTrials() {
         signal: AbortSignal.timeout(20_000),
       })
       if (!response.ok || !response.body) return { available: false, status: response.status, warmTrials: samples.length }
+      const headersMs = performance.now() - started
       const reader = response.body.getReader()
       let firstByteMs = null
       for (;;) {
@@ -137,10 +138,10 @@ async function fishTrials() {
         if (done) break
         if (value?.length && firstByteMs === null) firstByteMs = performance.now() - started
       }
-      if (i > 0) samples.push({ firstByteMs, completeMs: performance.now() - started })
+      if (i > 0) samples.push({ headersMs, firstByteMs, completeMs: performance.now() - started })
     } catch (error) { return { available: false, error: error?.name ?? 'network error', warmTrials: samples.length } }
   }
-  return { available: true, warmTrials: samples.length, requestToFirstByteMs: stats(samples.map((row) => row.firstByteMs)), requestToCompleteMs: stats(samples.map((row) => row.completeMs)) }
+  return { available: true, warmTrials: samples.length, requestToHeadersMs: stats(samples.map((row) => row.headersMs)), requestToFirstByteMs: stats(samples.map((row) => row.firstByteMs)), requestToCompleteMs: stats(samples.map((row) => row.completeMs)) }
 }
 
 console.log(JSON.stringify({ note: 'Audio playback and HUD paint timings require a live browser; null means unmeasured, not zero.', summary, fish: await fishTrials(), rows }, null, 2))

@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process'
 import process from 'node:process'
 import { cpSync, existsSync, mkdirSync } from 'node:fs'
+import { stopProcessTree } from '../bridge/process.mjs'
 
 /**
  * Put MediaPipe's WebAssembly where the page can actually load it.
@@ -59,6 +60,7 @@ function run(name, command, args, colour, env) {
   const child = spawn(command, args, {
     env: { ...process.env, ...env },
     shell: false,
+    windowsHide: true,
   })
   child.stdout.on('data', (d) => process.stdout.write(label(d) + '\n'))
   child.stderr.on('data', (d) => process.stderr.write(label(d) + '\n'))
@@ -78,7 +80,7 @@ function shutdown(code) {
   stopping = true
   for (const c of children) {
     try {
-      c.kill('SIGTERM')
+      void stopProcessTree(c)
     } catch {
       /* already gone */
     }

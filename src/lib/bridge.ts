@@ -188,6 +188,7 @@ function scheduleReconnect() {
  */
 function dispatch(ws: WebSocket) {
   ws.addEventListener('message', (e: MessageEvent) => {
+    if (socket !== ws) return
     let msg: Frame
     try {
       msg = JSON.parse(e.data as string)
@@ -255,6 +256,7 @@ function connect(): Promise<WebSocket> {
   if (connecting) return connecting
 
   firstReady = deferred()
+  clearTimeout(reconnectTimer)
 
   connecting = new Promise<WebSocket>((resolve, reject) => {
     const ws = new WebSocket(BRIDGE_WS_URL)
@@ -271,7 +273,7 @@ function connect(): Promise<WebSocket> {
       settled = true
       clearTimeout(timer)
       connecting = null
-      if (err) { if (!everConnected) scheduleReconnect(); reject(err) }
+      if (err) { scheduleReconnect(); reject(err) }
       else resolve(ws)
     }
 
@@ -281,6 +283,7 @@ function connect(): Promise<WebSocket> {
     }, 6000)
 
     ws.onopen = () => {
+      if (settled) { ws.close(); return }
       socket = ws
       ws.send(JSON.stringify({ type: 'screen-status', sharing: screenSharing }))
       clearTimeout(stableTimer)
@@ -314,11 +317,11 @@ function connect(): Promise<WebSocket> {
       )
     }
     ws.onclose = () => {
-      clearTimeout(stableTimer)
       // A close before open is just a failed dial; after open it's a lost
       // session, and the two want different handling.
       settle(new Error('The bridge closed the connection.'))
       if (socket === ws) {
+        clearTimeout(stableTimer)
         socket = null
         onConnection?.('lost')
         scheduleReconnect()
@@ -334,10 +337,13 @@ export async function warmBridge(): Promise<void> {
   await connect()
   // Don't block startup if the bridge never announces — the dispatcher fills
   // the rail in whenever the list does turn up.
-  await Promise.race([
-    firstReady.promise,
-    new Promise<void>((resolve) => setTimeout(resolve, 2500)),
-  ])
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      firstReady.promise,
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, 2500) }),
+    ])
+  } finally { clearTimeout(timer) }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,23 +392,24 @@ export async function ask(
   // Claim the slot in this same tick. connect() below awaits, and two calls
   // made before it settles would otherwise both sail past the check above.
   let cancelledWhileDialling = false
-  pending = {
+  const dial = {
     finish: () => {
       cancelledWhileDialling = true
     },
   }
+  pending = dial
 
   let ws: WebSocket
   try {
     ws = await connect()
   } catch (err) {
-    pending = null
+    if (pending === dial) pending = null
     throw err
   }
 
   // Barged in on before the socket was even up. Nothing was ever asked.
   if (cancelledWhileDialling) {
-    pending = null
+    if (pending === dial) pending = null
     return { text: '', tools: [] }
   }
 
@@ -445,9 +452,6 @@ export async function ask(
     }
 
     const onMessage = (e: MessageEvent) => {
-      // Any frame at all is proof of life, including ones this turn ignores.
-      arm()
-
       let msg: Frame
       try {
         msg = JSON.parse(e.data as string)
@@ -468,6 +472,7 @@ export async function ask(
        * ask for BRAVO, and BRAVO's answer came back as "ALPHA".
        */
       if (msg.ask && msg.ask !== id) return
+      arm()
 
       try {
         switch (msg.type) {

@@ -32,7 +32,7 @@ test('does not split an abbreviation as a sentence', () => {
 
 test('waits for and removes a streamed code fence', () => {
   const partial = takeSpeechPhrases('Here is the result. ```js\nconst x = 1;')
-  assert.deepEqual(partial.phrases, [])
+  assert.deepEqual(partial.phrases, ['Here is the result. '])
   const complete = takeSpeechPhrases(partial.rest + '\n``` The result is ready. Next')
-  assert.deepEqual(complete.phrases, ['Here is the result. ', 'The result is ready. '])
+  assert.deepEqual(complete.phrases, ['The result is ready. '])
 })

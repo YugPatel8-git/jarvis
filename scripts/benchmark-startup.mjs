@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process'
 import { performance } from 'node:perf_hooks'
+import { stopProcessTree } from '../bridge/process.mjs'
 
 const port = Number(process.env.JARVIS_STARTUP_PORT ?? 5187)
 const bridgePort = Number(process.env.JARVIS_STARTUP_BRIDGE_PORT ?? 8788)
 const origin = `http://localhost:${port}`
 const began = performance.now()
 const times = { launcherSpawnMs: null, bridgeListeningMs: null, viteReadyMs: null, pageResponseMs: null, codexReadyMs: null, codexState: null, fishConfigured: null }
-const child = spawn(process.execPath, ['scripts/start.mjs'], {
+const child = spawn(process.execPath, [process.env.JARVIS_STARTUP_LAUNCHER ?? 'scripts/start.mjs'], {
   cwd: process.cwd(),
   env: { ...process.env, PORT: String(port), JARVIS_BRIDGE_PORT: String(bridgePort) },
   windowsHide: true,
@@ -44,5 +45,5 @@ try {
   const prewarmErrorClass = /not recognized|not found/i.test(output) ? 'command unavailable' : /timed out/i.test(output) ? 'timeout' : /app-server prewarm failed/i.test(output) ? 'other prewarm failure' : null
   console.log(JSON.stringify({ ...times, prewarmErrorClass, note: 'Page response is HTTP only; browser first render, WebSocket connect, and Kokoro readiness require a live browser.' }))
 } finally {
-  child.kill('SIGTERM')
+  await stopProcessTree(child)
 }

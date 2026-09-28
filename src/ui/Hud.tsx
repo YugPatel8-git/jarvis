@@ -130,7 +130,8 @@ function DecodeText({ text }: { text: string }) {
     [],
   )
 
-  const n = Math.floor(settled.current)
+  // The first useful line is readable immediately; decoration follows it.
+  const n = Math.max(80, Math.floor(settled.current))
   if (reduced || n >= text.length) return <>{text}</>
 
   return (

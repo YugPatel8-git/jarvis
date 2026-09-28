@@ -116,6 +116,7 @@ export default function App() {
   // -- one turn -------------------------------------------------------------
 
   const respond = async (said: string): Promise<void> => {
+    silence()
     const mine = ++turn.current
     const turnStartedAt = performance.now()
     const stale = () => mine !== turn.current
@@ -136,15 +137,13 @@ export default function App() {
 
     const turnId = newId()
     let started = false
-    let acknowledged = false
-    let toolSeen = false
-    const slowRequest = /\b(search|browse|research|check|inspect|find|open|read|analy[sz]e|compare|summari[sz]e|run|build|test|edit|change|create|write|fix|webpage|website|weather|latest|online)\b/i.test(said)
-    const ackTimer = setTimeout(() => {
-      if (!stale() && !started && !acknowledged && (toolSeen || slowRequest)) {
-        acknowledged = true
-        spk.say(toolSeen ? 'Checking that now.' : 'Give me a second.')
-      }
-    }, 550)
+    let displayBuffer = ''
+    let displayTimer: ReturnType<typeof setTimeout> | undefined
+    const flushDisplay = () => {
+      clearTimeout(displayTimer); displayTimer = undefined
+      if (displayBuffer && !stale()) store.getState().appendToLastTurn(displayBuffer)
+      displayBuffer = ''
+    }
 
     try {
       await ask(said, history.current, {
@@ -152,7 +151,7 @@ export default function App() {
           if (stale()) return
           if (screen.diag.visionRequestAt >= turnStartedAt && !screen.diag.firstResponseMs) screen.diag.firstResponseMs = Math.round(performance.now() - screen.diag.visionRequestAt)
           spk.markModelDelta()
-          clearTimeout(ackTimer)
+          const first = !started
           if (!started) {
             started = true
             store.getState().setPhase('speaking')
@@ -161,7 +160,9 @@ export default function App() {
             store.getState().setActiveTool(null)
             store.getState().pushTurn({ id: turnId, role: 'jarvis', text: '' })
           }
-          store.getState().appendToLastTurn(delta)
+          displayBuffer += delta
+          if (first) flushDisplay()
+          else if (!displayTimer) displayTimer = setTimeout(flushDisplay, 16)
           spk.push(delta)
         },
         onTool: (name) => {
@@ -173,9 +174,6 @@ export default function App() {
           if (!started) store.getState().setPhase('tooling')
           store.getState().setActiveTool(name)
           sfx.play('tool')
-          // Tool activity makes a delayed local acknowledgement eligible.
-          // The timer still skips it if real text starts first.
-          toolSeen = true
         },
       })
 
@@ -183,18 +181,20 @@ export default function App() {
 
       if (screen.diag.visionRequestAt >= turnStartedAt) screen.diag.totalMs = Math.round(performance.now() - screen.diag.visionRequestAt)
 
+      flushDisplay()
       await spk.end()
       if (stale()) return
       sfx.play('done')
     } catch (err) {
       if (stale()) return
+      spk.cancel()
       console.error(err)
       sfx.play('error')
       store
         .getState()
         .setError(err instanceof Error ? err.message : 'Something went wrong.')
     } finally {
-      clearTimeout(ackTimer)
+      flushDisplay()
       if (!stale()) {
         speaker.current = null
         sfx.duck(false)

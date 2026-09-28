@@ -7,7 +7,7 @@ console.log('\nJARVIS preflight — read-only checks; nothing is installed or ch
 const major = Number(process.versions.node.split('.')[0])
 line(major >= 20 ? ' ok ' : 'note', `Node.js ${process.versions.node} (20+ required).`)
 
-const codex = spawnSync('codex', ['--version'], { encoding: 'utf8', timeout: 10_000, shell: process.platform === 'win32' })
+const codex = spawnSync('codex', ['--version'], { encoding: 'utf8', timeout: 10_000, shell: process.platform === 'win32', windowsHide: true })
 if (codex.status === 0) {
   line(' ok ', `Codex CLI found: ${codex.stdout.trim()}`)
   line('  · ', 'JARVIS will reuse the CLI ChatGPT login. It never uses an API key.')

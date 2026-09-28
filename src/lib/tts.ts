@@ -345,9 +345,15 @@ type Item = {
   /** Generation starts at most one phrase ahead, while playback is active. */
   audio?: Promise<string | null> | null
   stages: Record<string, number>
+  dispose?: () => void
+  streamFailed?: boolean
+  failPlayback?: () => void
 }
 
+let activeSpeaker: Speaker | null = null
+
 export function createSpeaker(context: SpeechContext = {}): Speaker {
+  activeSpeaker?.cancel()
   const turnStart = performance.now()
   const useFish = caps().ttsEngine === 'fish'
   // Keep one timbre per answer; a model finishing its first download midway
@@ -359,7 +365,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   diag.firstAudioReadyMs = 0
   diag.firstAudibleMs = 0
   const mark = (field: 'firstModelDeltaMs' | 'firstPhraseMs' | 'firstTtsStartMs' | 'firstAudioReadyMs' | 'firstAudibleMs') => {
-    if (!diag[field]) diag[field] = Math.round(performance.now() - turnStart)
+    if (!cancelled && !diag[field]) diag[field] = Math.max(1, Math.round(performance.now() - turnStart))
   }
   const queue: Item[] = []
   let buffer = ''
@@ -367,6 +373,11 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   let outLevel = 0
   let pumping = false
   let playingAudio = false
+  let fishFailed = false
+  let localFailed = false
+  const resources = new Set<Item>()
+  let finishPlayback: (() => void) | null = null
+  let finishNative: (() => void) | null = null
 
   let currentAudio: HTMLAudioElement | null = null
   const requests = new Set<AbortController>()
@@ -379,6 +390,26 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
     drained = []
     for (const r of waiting) r()
   }
+
+  const localAudio = (item: Item): Promise<string | null> | null => {
+    if (cancelled || localFailed || kokoro.isUnavailable()) return null
+    // A cold model download must not hold the current phrase silent.
+    if (!kokoro.isReady()) { void kokoro.load(); return null }
+    item.engine = 'kokoro'
+    return new Promise((resolve) => {
+      let done = false
+      const finish = (url: string | null) => {
+        if (done) { if (url) URL.revokeObjectURL(url); return }
+        done = true; clearTimeout(timer); resolve(url)
+      }
+      const timer = setTimeout(() => { localFailed = true; finish(null) }, 8000)
+      const dispose = item.dispose
+      item.dispose = () => { dispose?.(); finish(null) }
+      void kokoro.speak(item.text).then(finish, () => { localFailed = true; finish(null) })
+    })
+  }
+
+  const failFish = () => { fishFailed = true; for (const request of requests) request.abort() }
 
   const enqueue = (sentence: string, priority = false) => {
     if (cancelled) return
@@ -401,9 +432,10 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       queue.push(item)
     }
     diag.queueDepth = queue.length
-    // If phrase one is already playing, prepare phrase two immediately.
+    // Fish can download one phrase ahead even before playback is ready.
+    // Keep local synthesis sequential until the current audio is playing.
     // The pump still owns playback order, so there can be no overlap.
-    if (playingAudio && queue.length <= (settings.gap === 'tight' ? 2 : 1)) prime(item)
+    if ((playingAudio || (pumping && useFish && !fishFailed)) && queue.length <= (settings.gap === 'tight' ? 2 : 1)) prime(item)
     void pump()
   }
 
@@ -411,8 +443,9 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   function synthesise(item: Item): Promise<string | null> | null {
     const { text } = item
     if (item.model) mark('firstTtsStartMs')
-    if (useFish) {
+    if (useFish && !fishFailed) {
       const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 20_000)
       let streaming = false
       requests.add(controller)
       diag.pendingFish = requests.size
@@ -424,6 +457,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         body: JSON.stringify({ text }),
         signal: controller.signal,
       }).then(async (res) => {
+        if (cancelled) { await res.body?.cancel(); return null }
         if (!res.ok) return null
         item.stages.headers = Math.round(performance.now() - item.queuedAt)
         const reader = res.body?.getReader()
@@ -431,24 +465,40 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('audio/mpeg')) {
           const media = new MediaSource()
           const url = URL.createObjectURL(media)
-          let source: SourceBuffer
+          let source: SourceBuffer | undefined
           const pending: Uint8Array[] = []
+          let pendingBytes = 0
           let ended = false
+          const failStream = () => { item.streamFailed = true; failFish(); item.failPlayback?.() }
           const append = () => {
             if (!source || source.updating || media.readyState !== 'open' || !pending.length) {
               if (source && ended && !source.updating && !pending.length && media.readyState === 'open') media.endOfStream()
               return
             }
-            source.appendBuffer(pending.shift()! as Uint8Array<ArrayBuffer>)
+            const chunk = pending.shift()!
+            pendingBytes -= chunk.length
+            try { source.appendBuffer(chunk as Uint8Array<ArrayBuffer>) }
+            catch { pending.length = 0; failStream() }
           }
           streaming = true
-          media.addEventListener('sourceopen', () => {
+          const opened = () => {
             try {
               source = media.addSourceBuffer('audio/mpeg')
               source.addEventListener('updateend', append)
+              source.addEventListener('error', failStream)
               append()
-            } catch { if (media.readyState === 'open') media.endOfStream('decode') }
-          }, { once: true })
+            } catch { failStream() }
+          }
+          media.addEventListener('sourceopen', opened, { once: true })
+          item.dispose = () => {
+            clearTimeout(timeout)
+            controller.abort()
+            void reader.cancel().catch(() => {})
+            pending.length = 0
+            media.removeEventListener('sourceopen', opened)
+            source?.removeEventListener('updateend', append)
+            source?.removeEventListener('error', failStream)
+          }
           void (async () => {
             try {
               for (;;) {
@@ -459,18 +509,26 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
                     item.stages.firstByte = Math.round(performance.now() - item.queuedAt)
                     item.stages.decodeStart = item.stages.firstByte
                   }
+                  pendingBytes += value.length
+                  if (pendingBytes > 8 * 1024 * 1024) throw new Error('Speech buffer limit exceeded')
                   pending.push(value); append()
                   diag.stages = { ...item.stages }
                 }
               }
+              if (cancelled) return
               item.stages.complete = Math.round(performance.now() - item.queuedAt)
               diag.stages = { ...item.stages }
               ended = true; append()
-            } catch { if (media.readyState === 'open') media.endOfStream('network') }
-            finally { requests.delete(controller); diag.pendingFish = requests.size }
+            } catch {
+              if (cancelled) return
+              failStream()
+              ended = true
+              pending.length = 0
+              try { if (media.readyState === 'open' && !source?.updating) media.endOfStream('network') } catch {}
+            }
+            finally { clearTimeout(timeout); requests.delete(controller); if (!cancelled) diag.pendingFish = requests.size }
           })()
           diag.stages = { ...item.stages }
-          if (item.model) mark('firstAudioReadyMs')
           return url
         }
         const chunks: Uint8Array[] = []
@@ -483,6 +541,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
             if (item.stages.firstByte === undefined) item.stages.firstByte = Math.round(performance.now() - item.queuedAt)
             chunks.push(value)
             size += value.length
+            if (size > 8 * 1024 * 1024) { controller.abort(); return null }
           }
         }
         item.stages.complete = Math.round(performance.now() - item.queuedAt)
@@ -490,23 +549,21 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         item.stages.decodeStart = item.stages.complete
         const blob = new Blob(chunks as BlobPart[], { type: 'audio/mpeg' })
         if (cancelled) return null
-        if (item.model) mark('firstAudioReadyMs')
         diag.stages = { ...item.stages }
         return URL.createObjectURL(blob)
-      }).catch(() => null).finally(() => { if (!streaming) { requests.delete(controller); diag.pendingFish = requests.size } })
+      }).catch(() => null).finally(() => { if (!streaming) { clearTimeout(timeout); requests.delete(controller); if (!cancelled) diag.pendingFish = requests.size } })
         .then(async (url) => {
           if (url) return url
-          if (cancelled || kokoro.isUnavailable()) return null
-          item.engine = 'kokoro'
+          if (cancelled) return null
+          failFish()
           item.stages.fallbackStart = Math.round(performance.now() - item.queuedAt)
-          const local = await kokoro.speak(text).catch(() => null)
-          if (local && item.model) mark('firstAudioReadyMs')
+          const local = await localAudio(item)
           return local
         })
     }
-    if (useKokoro && !kokoro.isUnavailable()) {
+    if ((useKokoro || fishFailed) && !kokoro.isUnavailable()) {
       item.engine = 'kokoro'
-      return kokoro.speak(text).then((url) => { if (url && item.model) mark('firstAudioReadyMs'); return url }).catch(() => null)
+      return localAudio(item)
     }
     item.engine = 'system'
     return null
@@ -515,9 +572,15 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   /** Start generating an item's audio if it hasn't begun. */
   const prime = (item: Item | undefined) => {
     if (item && item.audio === undefined) {
+      resources.add(item)
       const audio = synthesise(item)
       item.audio = audio?.then((url) => {
-        if (cancelled && url) URL.revokeObjectURL(url)
+        if (url) {
+          const dispose = item.dispose
+          let released = false
+          item.dispose = () => { if (released) return; released = true; dispose?.(); URL.revokeObjectURL(url) }
+        }
+        if (cancelled) { item.dispose?.(); resources.delete(item) }
         return cancelled ? null : url
       }) ?? null
     }
@@ -558,10 +621,12 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (!played && !cancelled) {
           if (item.engine === 'fish') {
             item.stages.fallbackStart = Math.round(performance.now() - item.queuedAt)
-            const local = await kokoro.speak(item.text).catch(() => null)
+            failFish()
+            const local = await localAudio(item)
             if (cancelled) { if (local) URL.revokeObjectURL(local); return }
             if (local) {
               item.engine = 'kokoro'
+              item.streamFailed = false
               diag.engine = 'kokoro'
               if (await playUrl(local, item)) return
             }
@@ -577,8 +642,10 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       diag.engine = 'system'
       await speakNative(item.text, item.queuedAt, item.model)
     } finally {
+      item.dispose?.()
+      resources.delete(item)
       playingAudio = false
-      if (speaking === item.text) setSpeaking('')
+      if (activeSpeaker === speaker && speaking === item.text) setSpeaking('')
     }
   }
 
@@ -597,7 +664,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       // paused, so it is safe to fire before every utterance.
       speechSynthesis.resume()
 
-      const u = new SpeechSynthesisUtterance(text)
+      let u = new SpeechSynthesisUtterance(text)
       const voice = pickVoice()
       if (voice) u.voice = voice
       u.lang = voice?.lang ?? 'en-GB'
@@ -633,6 +700,8 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (done) return
         done = true
         nativeInFlight = false
+        if (finishNative === finish) finishNative = null
+        u.onstart = null; u.onend = null; u.onerror = null
         if (watchdog) clearTimeout(watchdog)
         if (keepalive) clearInterval(keepalive)
         cancelAnimationFrame(raf)
@@ -644,6 +713,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       }
 
       u.onstart = () => {
+        if (done || cancelled) return
         if (model) {
           mark('firstAudioReadyMs')
           mark('firstAudibleMs')
@@ -654,6 +724,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (!diag.bestStartLatencyMs || diag.lastStartLatencyMs < diag.bestStartLatencyMs) diag.bestStartLatencyMs = diag.lastStartLatencyMs
         diag.lastError = ''
         if (watchdog) clearTimeout(watchdog)
+        watchdog = setTimeout(() => { finish(); speechSynthesis.cancel(); speechSynthesis.resume() }, 45_000)
         // Chrome stops speaking after roughly fifteen seconds unless the engine
         // is nudged. A pause/resume pair is the standard keepalive and is
         // inaudible; without it long answers cut off mid-sentence.
@@ -687,14 +758,22 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       watchdog = setTimeout(() => {
         if (done || started) return
         console.warn('[jarvis] speech did not start — un-wedging the engine')
+        // Retry with a new utterance: delayed cancellation events from the
+        // swallowed utterance must not complete the replacement's promise.
+        const next = new SpeechSynthesisUtterance(text)
+        next.voice = u.voice; next.lang = u.lang; next.rate = u.rate; next.pitch = u.pitch
+        next.onstart = u.onstart; next.onend = u.onend; next.onerror = u.onerror
+        u.onstart = null; u.onend = null; u.onerror = null
         speechSynthesis.cancel()
         speechSynthesis.resume()
+        u = next
         try {
           speechSynthesis.speak(u)
         } catch {
           finish()
           return
         }
+        if (done || started) return
         watchdog = setTimeout(() => {
           if (done || started) return
           console.error('[jarvis] system speech engine is not responding')
@@ -707,7 +786,8 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       diag.lastText = text.slice(0, 60)
       diag.voice = u.voice?.name ?? 'default'
       nativeInFlight = true
-      speechSynthesis.speak(u)
+      finishNative = finish
+      try { speechSynthesis.speak(u) } catch { finish() }
     })
 
   const playUrl = (url: string, item: Item) =>
@@ -721,12 +801,14 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       diag.voice = diag.engine === 'fish' ? 'Fish Audio' : kokoro.activeVoice()
 
       let read: (() => number) | null = null
+      const nodes: AudioNode[] = []
       const ctx = outputContext()
       if (ctx) {
         try {
           const analyser = ctx.createAnalyser()
           analyser.fftSize = 256
           const source = ctx.createMediaElementSource(audio)
+          nodes.push(source, analyser)
           const presence = ctx.createBiquadFilter()
           presence.type = 'peaking'; presence.frequency.value = 3000; presence.Q.value = 0.8
           presence.gain.value = settings.clarity === 'medium' ? 1.5 : settings.clarity === 'low' ? 0.7 : 0
@@ -736,6 +818,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
           const gain = ctx.createGain()
           gain.gain.value = settings.volume / 100
           const ceiling = ctx.createWaveShaper()
+          nodes.push(presence, compressor, gain, ceiling)
           const curve = new Float32Array(1024)
           for (let i = 0; i < curve.length; i++) {
             const x = (i / (curve.length - 1)) * 2 - 1
@@ -776,8 +859,16 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       const finish = () => {
         if (done) return
         done = true
+        if (finishPlayback === finish) finishPlayback = null
+        item.failPlayback = undefined
         clearTimeout(watchdog)
         cancelAnimationFrame(raf)
+        audio.onplaying = null; audio.onended = null; audio.oncanplay = null; audio.onerror = null; audio.onpause = null
+        audio.pause()
+        audio.removeAttribute('src')
+        audio.load()
+        for (const node of nodes) node.disconnect()
+        item.dispose?.()
         outLevel = 0.12
         URL.revokeObjectURL(url)
         if (currentAudio === audio) currentAudio = null
@@ -787,6 +878,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       // SpeechSynthesisUtterance.onstart, and it is what makes the diagnostics
       // verdict — and the T self-test — tell the truth on the premium path.
       audio.onplaying = () => {
+        if (done || cancelled || started) return
         started = true
         item.stages.playbackStart = Math.round(performance.now() - queuedAt)
         if (previousEnd) {
@@ -804,7 +896,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       audio.onended = () => { previousEnd = performance.now(); finish() }
       // canplay means enough data has decoded to start, not that the entire
       // streamed MP3 has been decoded.
-      audio.oncanplay = () => { item.stages.decodeReady = Math.round(performance.now() - queuedAt); diag.stages = { ...item.stages } }
+      audio.oncanplay = () => { if (done || cancelled) return; if (model) mark('firstAudioReadyMs'); item.stages.decodeReady = Math.round(performance.now() - queuedAt); diag.stages = { ...item.stages } }
       audio.onerror = () => {
         // A decode or network failure on a blob we already hold is rare, but
         // silent when it happens: the sentence simply never plays and the queue
@@ -818,8 +910,12 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       // paused element never fires `ended`. Without this the promise never
       // settles and every await behind it hangs for the life of the page.
       audio.onpause = finish
+      finishPlayback = finish
+      item.failPlayback = () => { failed = true; finish() }
+      if (item.streamFailed) { item.failPlayback(); return }
       item.stages.playbackScheduled = Math.round(performance.now() - queuedAt)
       void audio.play().catch((err) => {
+        if (done || cancelled) return
         diag.failures++
         diag.lastError = String((err as Error)?.name ?? 'play-rejected')
         failed = true
@@ -827,7 +923,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       })
     })
 
-  return {
+  const speaker: Speaker = {
     say(text) {
       enqueue(text, true)
     },
@@ -853,6 +949,8 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       cancelled = true
       buffer = ''
       queue.length = 0
+      for (const item of resources) item.dispose?.()
+      resources.clear()
       diag.queueDepth = 0
       for (const request of requests) request.abort()
       requests.clear()
@@ -866,6 +964,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       // otherwise silence an unrelated speaker mid-word.
       if (nativeInFlight) {
         nativeInFlight = false
+        finishNative?.()
         speechSynthesis.cancel()
         // Always pair the cancel with a resume — see the note in speakNative.
         // Leaving the engine cancelled is what silences every later sentence.
@@ -875,10 +974,13 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         currentAudio.pause()
         currentAudio = null
       }
+      finishPlayback?.()
       outLevel = 0
       settleDrained()
     },
     level: () => outLevel,
     markModelDelta: () => mark('firstModelDeltaMs'),
   }
+  activeSpeaker = speaker
+  return speaker
 }

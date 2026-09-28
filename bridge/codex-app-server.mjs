@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import { performance } from 'node:perf_hooks'
 import process from 'node:process'
 import { CodexConversation as ExecFallback, codexModelLabel } from './codex.mjs'
+import { stopProcessTree } from './process.mjs'
 
 const TURN_TIMEOUT_MS = Number(process.env.JARVIS_TURN_TIMEOUT_MS ?? 120_000)
 const MODEL = process.env.JARVIS_CODEX_MODEL?.trim() || 'gpt-5.6-sol'
@@ -44,6 +45,7 @@ export class CodexAppServerConversation {
     this.onFailure = onFailure ?? (() => {})
     this.spawnProcess = spawnProcess
     this.child = null; this.pending = new Map(); this.requestId = 0
+    this.retiredTurns = new Set()
     this.threadId = null; this.turnId = null; this.active = null; this.starting = null; this.queuedAsk = null
     this.interrupting = null; this.nextWarmAt = 0; this.restartAttempts = 0; this.restartTimer = null; this.readyAt = 0; this.closing = false
     this.state = 'warming'; this.model = MODEL; this.supportedEfforts = []
@@ -65,20 +67,23 @@ export class CodexAppServerConversation {
     this.onTiming('processSpawnReturnMs', performance.now() - began)
     this.child = child
     child.stderr.resume()
-    child.once('exit', (code) => this.#died(new Error(`Codex app-server exited (${code}).`)))
-    child.once('error', (err) => this.#died(err))
-    createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) => this.#line(line))
+    child.once('exit', (code) => { if (this.child === child) this.#died(new Error(`Codex app-server exited (${code}).`)) })
+    child.once('error', (err) => { if (this.child === child) this.#died(err) })
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
+    child.once('close', () => lines.close())
+    lines.on('line', (line) => { if (this.child === child) this.#line(line) })
     await this.#request('initialize', { clientInfo: { name: 'jarvis_local', title: 'JARVIS Local Bridge', version: '1.0.0' } })
     this.#notify('initialized', {})
     this.onTiming('appServerInitializeMs', performance.now() - began)
-    try {
-      const catalogAt = performance.now()
-      const models = await this.#request('model/list', { limit: 100 })
+    // Optional metadata must not delay opening the thread or the first turn.
+    const catalogAt = performance.now()
+    void this.#request('model/list', { limit: 100 }).then((models) => {
+      if (this.child !== child) return
       this.modelCatalog = models.data ?? []
-      const chosen = MODEL ? this.modelCatalog.find((x) => x.model === MODEL || x.id === MODEL) : null
-      if (chosen) this.model = chosen.model
+      const chosen = this.modelCatalog.find((x) => x.model === this.model || x.id === this.model)
+      this.supportedEfforts = chosen?.supportedReasoningEfforts?.map((x) => x.reasoningEffort) ?? []
       this.onTiming('modelCatalogMs', performance.now() - catalogAt)
-    } catch { /* optional metadata */ }
+    }).catch(() => {})
     const resuming = Boolean(this.threadId), threadAt = performance.now()
     try { await this.#openThread(resuming) }
     catch (error) {
@@ -91,7 +96,7 @@ export class CodexAppServerConversation {
   }
   async #openThread(resume = false) {
     const config = { mcp_servers: { jarvis: { command: process.execPath, args: [mcpPath()], env_vars: ['JARVIS_ROUTER_TOKEN', 'JARVIS_BRIDGE_PORT'], required: true, default_tools_approval_mode: 'approve' } }, features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])) }
-    const continuity = this.recent.length ? `\nBounded recent context from the prior thread; treat it as potentially stale:\n${this.recent.map((x) => `User: ${x.prompt}\nJARVIS: ${x.answer}`).join('\n').slice(-RECENT_CHARS)}` : ''
+    const continuity = !resume && this.recent.length ? `\nBounded recent context from the prior thread; treat it as potentially stale:\n${this.recent.map((x) => `User: ${x.prompt}\nJARVIS: ${x.answer}`).join('\n').slice(-RECENT_CHARS)}` : ''
     const common = { cwd: this.cwd, approvalPolicy: 'never', sandbox: 'read-only', model: this.model, developerInstructions: PERSONA + continuity, config }
     const result = resume
       ? await this.#request('thread/resume', { threadId: this.threadId, ...common })
@@ -118,8 +123,10 @@ export class CodexAppServerConversation {
       this.threadId = null; this.turns = 0; this.contextChars = 0; await this.#openThread(false)
     }
     if (queued.cancelled) return ''
-    const active = { prompt, answer: '', resolve: null, reject: null, start, firstEvent: false, firstText: false, timer: null }
+    const active = { prompt, answer: '', resolve: null, reject: null, start, firstEvent: false, firstText: false, timer: null, turnId: null, submission: null }
     const completion = new Promise((resolve, reject) => { active.resolve = resolve; active.reject = reject })
+    // A crash can reject completion before turn/start itself has settled.
+    void completion.catch(() => {})
     this.active = active; this.queuedAsk = null; active.timer = setTimeout(() => {
       this.onFailure('turn-timeout')
       this.cancel(new Error('Codex timed out, sir. I stopped that turn.'))
@@ -131,12 +138,13 @@ export class CodexAppServerConversation {
       const submitted = performance.now()
       const effort = this.#effort(prompt)
       this.onRouting({ model: this.model, effort })
-      const result = await this.#request('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt, text_elements: [] }], effort, summary: 'none', approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
-      this.turnId = result.turn.id; this.onTiming('requestSubmissionMs', performance.now() - submitted)
+      active.submission = this.#request('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt, text_elements: [] }], effort, summary: 'none', approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
+      const result = await active.submission
+      if (this.active === active) { active.turnId = result.turn.id; this.turnId = result.turn.id; this.onTiming('requestSubmissionMs', performance.now() - submitted) }
       return await completion
     } catch (err) {
       if (this.active === active) this.#finish(err)
-      if (!active.answer && !this.child) { this.state = 'fallback'; this.onState('fallback'); return this.fallback.ask(prompt) }
+      // Once submitted, replay could duplicate a tool action after a crash.
       throw err
     }
     } finally { if (this.queuedAsk === queued) this.queuedAsk = null }
@@ -153,6 +161,12 @@ export class CodexAppServerConversation {
     }
     if (Object.hasOwn(msg, 'id') && msg.method) { this.#write({ id: msg.id, error: { code: -32601, message: 'Client request not supported' } }); return }
     const active = this.active; if (!active || !msg.method) return
+    if (msg.params?.threadId && msg.params.threadId !== this.threadId) return
+    const eventTurn = msg.params?.turnId ?? msg.params?.turn?.id
+    if (eventTurn && this.retiredTurns.has(eventTurn)) return
+    if (active.turnId && eventTurn && eventTurn !== active.turnId) return
+    if (msg.method === 'turn/started') active.turnId = eventTurn ?? active.turnId
+    if (!active.turnId && msg.method !== 'turn/started') return
     const elapsed = performance.now() - active.start
     if (!active.firstEvent) { active.firstEvent = true; this.onTiming('firstCodexEventMs', elapsed) }
     if (msg.method === 'item/agentMessage/delta' && typeof msg.params?.delta === 'string') {
@@ -164,6 +178,7 @@ export class CodexAppServerConversation {
   }
   #finish(err) {
     const active = this.active; if (!active) return
+    this.#retire(active.turnId)
     this.active = null; clearTimeout(active.timer); this.onTiming('completionMs', performance.now() - active.start)
     if (err) active.reject(err)
     else {
@@ -191,6 +206,11 @@ export class CodexAppServerConversation {
     })
   }
   #notify(method, params) { this.#write({ method, params }) }
+  #retire(turnId) {
+    if (!turnId) return
+    this.retiredTurns.add(turnId)
+    if (this.retiredTurns.size > 64) this.retiredTurns.delete(this.retiredTurns.values().next().value)
+  }
   #write(message) {
     if (!this.child?.stdin.writable) throw new Error('Codex app-server is not connected')
     this.child.stdin.write(`${JSON.stringify(message)}\n`)
@@ -214,7 +234,7 @@ export class CodexAppServerConversation {
     if (!this.child) return
     const child = this.child; this.child = null
     try { child.stdin.end() } catch {}
-    child.kill('SIGTERM')
+    void stopProcessTree(child)
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error('Codex app-server stopped')) }
     this.pending.clear()
   }
@@ -222,9 +242,14 @@ export class CodexAppServerConversation {
     if (this.queuedAsk) { this.queuedAsk.cancelled = true; this.queuedAsk = null }
     if (this.fallback.child) return this.fallback.cancel()
     if (!this.active) return
-    const active = this.active, turnId = this.turnId
+    const active = this.active, threadId = this.threadId, child = this.child
+    this.#retire(active.turnId)
     this.active = null; clearTimeout(active.timer); if(error)active.reject(error);else active.resolve(active.answer.trim())
-    if (this.child && this.threadId && turnId) this.interrupting = this.#request('turn/interrupt', { threadId: this.threadId, turnId }).catch(() => {})
+    if (child && threadId) this.interrupting = (async () => {
+      const turnId = active.turnId ?? (await active.submission)?.turn?.id
+      this.#retire(turnId)
+      if (turnId && this.child === child) await this.#request('turn/interrupt', { threadId, turnId })
+    })().catch(() => {})
   }
   close() {
     this.closing = true; clearTimeout(this.restartTimer)

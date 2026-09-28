@@ -5,14 +5,17 @@ const BOUNDARY = /[.!?;:,]["'’)\]]?\s+|\n\n/g
 export function takeSpeechPhrases(buffer: string): { phrases: string[]; rest: string } {
   const phrases: string[] = []
   let rest = buffer
+  let protectedTail = ''
   // A streamed code span can contain ordinary punctuation. Wait for its
   // closing marker before removing it, so code cannot leak as a later phrase.
   const ticks = rest.match(/`/g)?.length ?? 0
   const fences = rest.match(/```/g)?.length ?? 0
   if (ticks % 2 || fences % 2 || (ticks && !/```[\s\S]*?```|`[^`]+`/.test(rest))) {
-    return { phrases, rest }
+    const codeStart = rest.indexOf('`')
+    protectedTail = rest.slice(codeStart)
+    rest = rest.slice(0, codeStart)
   }
-  if (ticks) rest = rest.replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ')
+  if (ticks) rest = rest.replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trimStart()
   for (;;) {
     BOUNDARY.lastIndex = 0
     let match: RegExpExecArray | null
@@ -36,5 +39,5 @@ export function takeSpeechPhrases(buffer: string): { phrases: string[]; rest: st
     phrases.push(phrase)
     rest = rest.slice(cut)
   }
-  return { phrases, rest }
+  return { phrases, rest: rest + protectedTail }
 }

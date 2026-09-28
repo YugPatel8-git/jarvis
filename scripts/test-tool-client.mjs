@@ -13,6 +13,7 @@ test('MCP tool client reuses one authenticated socket and reconnects after a dro
     connections++
     ws.on('message', (raw) => {
       const message = JSON.parse(raw)
+      if (message.tool === 'disconnect') return ws.terminate()
       ws.send(JSON.stringify({ id: message.id, result: { tool: message.tool } }))
     })
   })
@@ -25,6 +26,9 @@ test('MCP tool client reuses one authenticated socket and reconnects after a dro
     await new Promise((resolve) => setTimeout(resolve, 30))
     assert.deepEqual(await callRouter('shell', {}), { tool: 'shell' })
     assert.equal(connections, 2)
+    await assert.rejects(callRouter('disconnect', {}), /disconnected/)
+    assert.deepEqual(await callRouter('shell', {}), { tool: 'shell' })
+    assert.equal(connections, 3)
   } finally {
     for (const client of server.clients) client.terminate()
     await new Promise((resolve) => server.close(resolve))

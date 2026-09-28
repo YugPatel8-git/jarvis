@@ -7,7 +7,7 @@ import ts from 'typescript'
 const source = readFileSync(new URL('../src/lib/screen.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 
-function harness({ secure = true, supported = true, pickerError = null } = {}) {
+function harness({ secure = true, supported = true, pickerError = null, picker } = {}) {
   let pickerCalls = 0, stopped = 0, ended = null, pixel = 80
   const statuses = []
   const track = {
@@ -27,7 +27,7 @@ function harness({ secure = true, supported = true, pickerError = null } = {}) {
     exports,
     require: (id) => { assert.equal(id, './bridge'); return { setScreenSharing: (value) => statuses.push(value) } },
     window: { isSecureContext: secure }, performance,
-    navigator: { mediaDevices: supported ? { getDisplayMedia: () => { pickerCalls++; return pickerError ? Promise.reject(pickerError) : Promise.resolve(stream) } } : undefined },
+    navigator: { mediaDevices: supported ? { getDisplayMedia: () => { pickerCalls++; return picker ? picker(stream) : pickerError ? Promise.reject(pickerError) : Promise.resolve(stream) } } : undefined },
     console: { info() {}, warn() {} },
     document: { createElement: (tag) => tag === 'video'
       ? { videoWidth: 1920, videoHeight: 1080, play: async () => {}, pause() {}, srcObject: null }
@@ -48,6 +48,20 @@ test('screen is off until explicit activation and picker runs once', async () =>
   assert.equal(h.pickerCalls, 1)
   assert.equal(h.screen.sharing(), true)
   assert.deepEqual(h.statuses, [true])
+})
+
+test('concurrent screen starts share the picker and stop invalidates a pending selection', async () => {
+  let select
+  const h = harness({ picker: (stream) => new Promise((resolve) => { select = () => resolve(stream) }) })
+  const first = h.screen.startSharing()
+  const second = h.screen.startSharing()
+  assert.equal(h.pickerCalls, 1)
+  h.screen.stopSharing()
+  select()
+  await Promise.all([first, second])
+  assert.equal(h.screen.sharing(), false)
+  assert.equal(h.stopped, 1)
+  assert.ok(h.screen.captureFrame().error)
 })
 
 test('unsupported and insecure contexts fail visibly before the picker', async () => {
@@ -81,4 +95,23 @@ test('unchanged frame is not re-encoded and native stop clears state', async () 
   assert.equal(h.screen.captureFrame().data, undefined)
   assert.equal(h.stopped, 1)
   assert.deepEqual(h.statuses, [true, false])
+})
+
+test('screen restart resets the frame cache and ignores an old track ending', async () => {
+  const tracks = []
+  const h = harness({ picker: async () => {
+    const track = { readyState: 'live', getSettings: () => ({}), addEventListener(_name, fn) { this.ended = fn }, stop() { this.readyState = 'ended' } }
+    tracks.push(track)
+    return { getVideoTracks: () => [track], getTracks: () => [track] }
+  } })
+  await h.screen.startSharing()
+  assert.ok(h.screen.captureFrame().data)
+  h.screen.stopSharing()
+  await h.screen.startSharing()
+  tracks[0].ended()
+  assert.equal(h.screen.sharing(), true)
+  assert.ok(h.screen.captureFrame().data, 'new sharing session sends a fresh frame')
+  tracks[1].ended()
+  assert.equal(h.screen.sharing(), false)
+  assert.ok(h.screen.captureFrame().error)
 })

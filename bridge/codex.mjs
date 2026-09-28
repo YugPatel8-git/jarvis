@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import process from 'node:process'
+import { stopProcessTree } from './process.mjs'
 
 const TURN_TIMEOUT_MS = Number(process.env.JARVIS_TURN_TIMEOUT_MS ?? 120_000)
 const MODEL = process.env.JARVIS_CODEX_MODEL?.trim() || 'gpt-5.6-sol'
@@ -109,10 +110,11 @@ export class CodexConversation {
     let answer = ''
     let stderr = ''
     let parseError = null
-    const timer = setTimeout(() => this.cancel(), TURN_TIMEOUT_MS)
+    const timer = setTimeout(() => { if (this.child === child) this.cancel() }, TURN_TIMEOUT_MS)
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
 
     lines.on('line', (line) => {
+      if (this.child !== child) return
       if (!line.trim()) return
       let event
       try {
@@ -151,6 +153,7 @@ export class CodexConversation {
       child.once('close', (code) => {
         clearTimeout(timer)
         lines.close()
+        if (this.child !== child) return resolve(answer.trim())
         if (this.child === child) this.child = null
         if (this.cancelled) return resolve(answer.trim())
         if (code !== 0) {
@@ -176,17 +179,7 @@ export class CodexConversation {
     // unwinding, so the next utterance starts a fresh session.
     this.sessionId = null
     child.stdin.destroy()
-    if (process.platform === 'win32' && child.pid) {
-      // codex.cmd runs beneath cmd.exe on Windows. Killing only the wrapper
-      // leaves codex.exe generating in the background, so terminate this one
-      // process tree by its concrete PID. No shell or model-supplied input is
-      // involved.
-      spawn(process.env.SystemRoot + '\\System32\\taskkill.exe', [
-        '/pid', String(child.pid), '/t', '/f',
-      ], { windowsHide: true, stdio: 'ignore', shell: false })
-    } else {
-      child.kill('SIGTERM')
-    }
+    void stopProcessTree(child)
   }
 
   close() {

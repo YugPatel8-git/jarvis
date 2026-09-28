@@ -1,5 +1,6 @@
 import http from 'node:http'
 import { randomBytes } from 'node:crypto'
+import { once } from 'node:events'
 import process from 'node:process'
 import { existsSync, readFileSync } from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
@@ -54,8 +55,9 @@ async function handle(req,res){
       const up=await fishSpeech(text,{env:fishEnv,signal:AbortSignal.any([controller.signal,AbortSignal.timeout(20000)])})
       if(!up?.audio){const notice=health.failure('fish','upstream');if(notice)send({type:'health-notice',text:notice});res.writeHead(502,{...h,'cache-control':'no-store'});return res.end('Speech generation unavailable.')}
       res.writeHead(200,{...h,'content-type':'audio/mpeg','cache-control':'no-store'})
+      res.flushHeaders()
       let first=true
-      for await(const c of up.audio){if(first){health.timing('fishFirstByte',performance.now()-began);first=false}res.write(c)}
+      for await(const c of up.audio){if(first){health.timing('fishFirstByte',performance.now()-began);first=false}if(!res.write(c))await once(res,'drain',{signal:controller.signal})}
       health.timing('fishComplete',performance.now()-began)
       const notice=health.mark('fish','ready');if(notice)send({type:'health-notice',text:notice})
       return res.end()
@@ -72,7 +74,16 @@ async function handle(req,res){
   }
   res.writeHead(404,h);res.end()
 }
-const server=http.createServer((q,s)=>handle(q,s).catch(e=>{if(!s.headersSent)s.writeHead(500,{'cache-control':'no-store'});s.end(q.url==='/tts'?'Speech generation unavailable.':String(e?.message??e))}))
+const server=http.createServer((q,s)=>{
+  // A disconnected reader must not turn response cleanup into a bridge crash.
+  s.on('error',()=>s.destroy())
+  void handle(q,s).catch(e=>{
+    if(s.destroyed||s.writableEnded)return
+    if(s.headersSent){s.destroy();return}
+    s.writeHead(500,{'cache-control':'no-store'})
+    s.end(q.url==='/tts'?'Speech generation unavailable.':String(e?.message??e))
+  })
+})
 const wss=new WebSocketServer({noServer:true,maxPayload:2*1024*1024})
 let frontend=null, seq=0, screenSharing=false
 const screenQuestion=(text)=>/\b(?:my screen|this screen|on screen|this window|this button|what am i looking at|what should i click|where should i click|read this error|what(?:'s| is) this error|currently open|guide me through this)\b/i.test(text)
@@ -102,9 +113,15 @@ wss.on('connection',(socket,req)=>{
     socket.on('message',async(raw)=>{let m;try{m=JSON.parse(raw)}catch{return}try{socket.send(JSON.stringify({id:m.id,result:await route(m.tool,m.args)}))}catch(e){socket.send(JSON.stringify({id:m.id,error:String(e?.message??e)}))}})
     return
   }
-  frontend=socket;health.mark('frontend','ready');socket.send(JSON.stringify({type:'ready',servers:[conversation.state==='ready'?'ai-core-ready':conversation.state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']}))
+  if(frontend&&frontend!==socket){
+    conversation.cancel()
+    for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface replaced.'));waiting.delete(id)}
+    frontend.close(1000,'Interface replaced')
+  }
+  frontend=socket;screenSharing=false;health.mark('frontend','ready');socket.send(JSON.stringify({type:'ready',servers:[conversation.state==='ready'?'ai-core-ready':conversation.state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']}))
   const seenAsks=new Set()
   socket.on('message',(raw)=>{
+    if(frontend!==socket)return
     let m;try{m=JSON.parse(raw)}catch{return}
     if(m.type==='screen-status'){screenSharing=m.sharing===true;return}
     if((m.type==='reply'||m.type==='approval-reply')&&m.id){const p=waiting.get(m.id);if(p){clearTimeout(p.timer);waiting.delete(m.id);p.ok(m)}return}
@@ -148,7 +165,7 @@ wss.on('connection',(socket,req)=>{
     const prompt=screenSharing&&screenQuestion(m.text)?`${m.text}\n[The user is sharing a screen. For visible screen content, use the vision tool with source=screen before answering. Use browser read instead if accessible page text already answers the question. Screen observation does not authorize actions.]`:m.text
     void conversation.ask(prompt).then(text=>send({type:'done',text,ask:currentAsk})).catch(e=>send({type:'error',message:String(e?.message??e),ask:currentAsk}))
   })
-  socket.on('close',()=>{if(frontend===socket){frontend=null;screenSharing=false;health.mark('frontend','recovering');health.failure('frontend','disconnect')}if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
+  socket.on('close',()=>{if(frontend!==socket)return;frontend=null;screenSharing=false;health.mark('frontend','recovering');health.failure('frontend','disconnect');if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
 })
 server.listen(PORT,HOST,()=>{console.log(`[jarvis] bridge listening on ws://${HOST}:${PORT}`);console.log(`[jarvis] backend ${appServerModelLabel(conversation)} via persistent app-server with exec fallback`);console.log(`[jarvis] speech ${fishConfigured(fishEnv)?`Fish Audio ${FISH_MODEL} with local fallback`:'local Kokoro/system'}`)})
 function shutdown(){conversation.close();server.close()}
