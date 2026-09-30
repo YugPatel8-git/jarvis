@@ -95,9 +95,10 @@ try {
     window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
     window.SpeechRecognition = class {
       constructor() { window.__recognizer = this; }
+      results = [];
       start() { queueMicrotask(() => this.onstart?.()); }
       abort() { this.onend?.(); }
-      result(text) { const result = [{ transcript: text }]; result.isFinal = true; this.onresult({ resultIndex: 0, results: [result] }); }
+      result(text) { const result = [{ transcript: text }]; result.isFinal = true; const resultIndex = this.results.length; this.results.push(result); this.onresult({ resultIndex, results: this.results }); }
     };
     navigator.mediaDevices.getUserMedia = async () => {
       window.__inputContext = new AudioContext();

@@ -28,6 +28,9 @@ import { getMic } from './audio'
  */
 
 export type VadHandlers = {
+  /** Energy edges from the existing detector; includes unconfirmed onset so a
+   *  pending turn cannot fire while a resumed word is being confirmed. */
+  onActivity?: (active: boolean) => void
   /** The signal crossed into speech. Instant; this is the barge-in trigger. */
   onStart: () => void
   /** Speech ended. The blob is one complete, decodable audio file. */
@@ -134,6 +137,7 @@ export async function startVad(h: VadHandlers): Promise<Vad> {
   let floor = 0.01
   let smoothEnergy = 0
   let threshold = 0
+  let active = false
 
   // Segment state.
   let recorder: MediaRecorder | null = null
@@ -218,6 +222,11 @@ export async function startVad(h: VadHandlers): Promise<Vad> {
     threshold = floor * TRIGGER_OVER_FLOOR * (guard ? GUARD_BOOST : 1)
     const release = threshold * RELEASE_RATIO
     const now = performance.now()
+    const nextActive = smoothEnergy > (speaking ? release : threshold)
+    if (nextActive !== active) {
+      active = nextActive
+      h.onActivity?.(active)
+    }
 
     if (!speaking) {
       if (smoothEnergy > threshold) {

@@ -45,28 +45,8 @@ export type Voice = {
 // Assembling one utterance out of several segments
 // ---------------------------------------------------------------------------
 
-/**
- * Why this exists.
- *
- * The voice-activity detector is an energy gate, and energy is a fact about the
- * room rather than about the sentence. It ends a segment after a fixed quiet
- * gap, so "what's the weather in — " *pause* " — London" is two segments, two
- * transcripts and, before this, two turns: the first one asking the model a
- * truncated question, the second arriving as a bare noun with no question left
- * to attach it to. People pause. They pause to think of the word, to look at
- * something, mid-list, before the important part. An assistant that treats the
- * first gap as the end of the thought is one you have to talk to carefully, and
- * having to talk carefully is the whole failure.
- *
- * So the segment is no longer the turn. Transcripts accumulate here, and the
- * turn fires only when the text looks finished AND the room has gone quiet.
- *
- * Crucially this costs nothing in the common case. A complete sentence with no
- * one speaking fires immediately — `holdFor` returns 0 — so the latency of an
- * ordinary question is exactly what it was. The waiting only happens when there
- * is a reason to wait.
- */
-
+/** Transcription can start after a 650ms VAD segment gap. Turn submission uses
+ * one silence deadline, counting that gap and transcription time together. */
 /**
  * Ending on one of these means the sentence is not over, whatever the silence
  * says. Function words only: they are closed-class, so the list is complete in
@@ -93,108 +73,64 @@ const TRAILS = /[,;:–—-]$/
  */
 const SELF_GUARD_MS = 350
 
-/**
- * A quiet gap this long with a finished-looking sentence ends the turn.
- *
- * Small on purpose: by the time a transcript reaches the assembler the detector
- * has already sat through SILENCE_MS of quiet and the transcriber has taken its
- * own few hundred milliseconds, so roughly a second of real silence has passed
- * already. All this window has to catch is someone drawing breath to add one
- * more clause. Making it generous here is what would make every ordinary
- * question feel slow.
- */
-const SETTLE_MS = 250
-/** ...and this long when the sentence is plainly unfinished. */
-const CONTINUE_MS = 1600
-/**
- * Nothing is held longer than this in total. A ceiling rather than a timer:
- * without it, someone who ends every clause on "and" could hold a turn open
- * for ever, and the assistant would look like it had stopped listening.
- */
-const MAX_HOLD_MS = 6000
+/** Total quiet time, not an additional wait after transcription. */
+const ENDPOINT_MS = 900
+/** A small allowance for explicitly unfinished wording, within the target. */
+const CONTINUE_MS = 1000
 
-/**
- * How long to keep waiting, given what has been said so far.
- * 0 means "this is a complete thought, send it now".
- */
-function holdFor(text: string): number {
-  const words = text.trim().split(/\s+/).filter(Boolean)
-  if (!words.length) return CONTINUE_MS
-  // An explicit terminator is the speaker telling us they are done.
-  if (/[.!?]$/.test(text)) return 0
-  if (TRAILS.test(text.trim())) return CONTINUE_MS
-  if (CONTINUES.test(words[words.length - 1])) return CONTINUE_MS
-  // One or two words is usually the start of something, not the whole of it —
-  // except for the short commands that genuinely are complete.
-  if (words.length <= 2 && !OVERRIDE.test(text)) return CONTINUE_MS
-  return SETTLE_MS
-}
-
-type Assembler = {
-  /** Add a transcript. `active` is true if the user is audibly still going. */
-  feed: (text: string, active: boolean) => void
-  /** Send whatever is held right now, if anything. */
-  flush: () => void
-  /** Throw away whatever is held — used when he stands down. */
-  cancel: () => void
-  held: () => string
+function silenceFor(text: string): number {
+  const trimmed = text.trim()
+  if (/[.!?]$/.test(trimmed)) return ENDPOINT_MS
+  return TRAILS.test(trimmed) || CONTINUES.test(trimmed) ? CONTINUE_MS : ENDPOINT_MS
 }
 
 function makeAssembler(h: {
   emit: (text: string) => void
   partial: (text: string) => void
-}): Assembler {
+  busy: () => boolean
+}) {
   let held = ''
+  let active = false
+  let quietAt = performance.now()
   let timer: ReturnType<typeof setTimeout> | null = null
-  let firstAt = 0
 
   const clear = () => {
-    if (timer) clearTimeout(timer)
+    if (timer !== null) clearTimeout(timer)
     timer = null
   }
-
-  const fire = () => {
+  const schedule = () => {
     clear()
-    const text = held.trim()
-    held = ''
-    firstAt = 0
-    if (text) h.emit(text)
+    if (!held || active || h.busy()) return
+    const wait = Math.max(0, silenceFor(held) - (performance.now() - quietAt))
+    diag.waitedMs = wait
+    const fire = () => {
+      timer = null
+      if (active || h.busy()) return
+      const text = held
+      held = ''
+      diag.holding = ''
+      if (text) h.emit(text)
+    }
+    if (wait === 0) fire()
+    else timer = setTimeout(fire, wait)
   }
-
   return {
-    feed(text, active) {
+    feed(text: string) {
       if (!text.trim()) return
       held = `${held} ${text}`.replace(/\s+/g, ' ').trim()
-      if (!firstAt) firstAt = Date.now()
-      // The caption shows the whole thought as it assembles, not just the
-      // fragment that happened to arrive last.
       h.partial(held)
       diag.holding = held
-      clear()
-
-      // Already talking again. Decide nothing now — the next transcript is
-      // part of this same sentence and will bring more of it.
-      if (active) {
-        timer = setTimeout(fire, MAX_HOLD_MS)
-        return
-      }
-
-      const wait = Math.min(
-        holdFor(held),
-        Math.max(0, MAX_HOLD_MS - (Date.now() - firstAt)),
-      )
-      diag.waitedMs = wait
-      if (wait === 0) {
-        fire()
-        return
-      }
-      timer = setTimeout(fire, wait)
+      schedule()
     },
-    flush: fire,
+    activity(value: boolean) {
+      active = value
+      if (!value) quietAt = performance.now()
+      schedule()
+    },
+    settle: schedule,
     cancel() {
       clear()
       held = ''
-      firstAt = 0
       diag.holding = ''
     },
     held: () => held,
@@ -369,12 +305,14 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
    */
   const assemble = makeAssembler({
     emit: (text) => {
+      if (stopped || h.mode() === 'deaf') return
       diag.dropped = ''
       diag.accepted++
       diag.holding = ''
       h.onUtterance(text)
     },
     partial: (text) => h.onPartial(text),
+    busy: () => draining || pendingAudio.length > 0 || (vad?.meter().speaking ?? false),
   })
 
   /**
@@ -425,7 +363,7 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
 
       // Not a turn yet — a piece of one. The assembler decides when the thought
       // is finished, reading the words and whether the room is still noisy.
-      assemble.feed(said, vad?.meter().speaking ?? false)
+      assemble.feed(said)
     } catch (err) {
       diag.restarts++
       diag.lastError = String(err)
@@ -443,10 +381,12 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
       }
     } finally {
       draining = false
+      if (!stopped) assemble.settle()
     }
   }
 
   vad = await startVad({
+    onActivity: (active) => assemble.activity(active),
     onStart: () => {
       const mode = h.mode()
       diag.mode = mode
@@ -540,16 +480,12 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
   let lastAlive = Date.now()
   let silenceTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** Same assembly rules as the premium path — a pause is not a full stop. */
-  const assemble = makeAssembler({
-    emit: (text) => {
-      diag.dropped = ''
-      diag.accepted++
-      diag.holding = ''
-      h.onUtterance(text)
-    },
-    partial: (text) => h.onPartial(text),
-  })
+  let speechActive = false
+  let speechEnded = false
+  let quietAt: number | null = null
+  let consumedThrough = -1
+  let lastResultIndex = -1
+  const finalResults = new Set<number>()
 
   const touch = () => {
     lastAlive = Date.now()
@@ -566,46 +502,68 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     interim = ''
     started = false
     barged = false
+    speechActive = false
+    speechEnded = false
   }
 
   const emit = () => {
     const text = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
     const mode = h.mode()
+    consumedThrough = lastResultIndex
+    finalResults.clear()
     reset()
-    if (!text || mode === 'deaf') return
+    quietAt = null
+    if (stopped || !text || mode === 'deaf') return
     if (isEcho(text, speakingNow())) {
       drop('echo of his own voice')
       return
     }
     diag.heard = text
     diag.heardAt = Date.now()
-    // The recogniser has already endpointed on its own 900ms gap; the assembler
-    // decides whether that gap actually ended the thought. `false` because a
-    // result only reaches here once the recogniser has gone quiet.
-    assemble.feed(text, false)
+    diag.dropped = ''
+    diag.accepted++
+    diag.holding = ''
+    h.onUtterance(text)
   }
 
   const bumpSilence = () => {
     clearSilence()
-    // Endpoint on a short quiet gap; the ElevenLabs path tunes this more
-    // finely, but a fixed window is plenty for the fallback.
-    silenceTimer = setTimeout(emit, 900)
+    const text = `${settled} ${interim}`.trim()
+    if (stopped || speechActive || !started || !text) return
+    quietAt ??= performance.now()
+    const wait = Math.max(0, silenceFor(text) - (performance.now() - quietAt))
+    diag.waitedMs = wait
+    if (wait === 0) emit()
+    else silenceTimer = setTimeout(emit, wait)
   }
 
   const onResult = (e: any) => {
+    if (stopped) return
     touch()
     const mode = h.mode()
     diag.mode = mode
     if (mode === 'deaf') {
-      interim = ''
+      consumedThrough = e.results.length - 1
+      reset()
       return
     }
+    // Result indices belong to one recognizer session. Ignore final revisions of
+    // an interim already submitted, but accept identical words at a NEW index.
+    if (e.results.length - 1 <= consumedThrough) return
+    const previousText = `${settled} ${interim}`
     let fresh = ''
     interim = ''
-    for (let i = e.resultIndex; i < e.results.length; i++) {
+    let newFinal = false
+    for (let i = Math.max(e.resultIndex, consumedThrough + 1); i < e.results.length; i++) {
+      lastResultIndex = Math.max(lastResultIndex, i)
       const chunk = e.results[i][0].transcript as string
-      if (e.results[i].isFinal) fresh += chunk
-      else interim += chunk
+      if (e.results[i].isFinal) {
+        if (!finalResults.has(i)) {
+          fresh += `${chunk} `
+          finalResults.add(i)
+          newFinal = true
+        }
+      } else interim += chunk
     }
     const heard = `${settled}${fresh} ${interim}`.replace(/\s+/g, ' ').trim()
     if (!heard) return
@@ -613,6 +571,15 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       interim = ''
       return
     }
+
+    // Prefer speech-end events; transcript activity is the fallback clock.
+    // Merely marking the same words final must not restart the quiet deadline.
+    if (interim) speechEnded = false
+    if (!speechEnded && (quietAt === null || interim || (newFinal && norm(heard) !== norm(previousText)))) {
+      quietAt = performance.now()
+    }
+    // Some engines provide a final result without a matching speech-end event.
+    if (newFinal) speechActive = false
 
     settled += fresh
     const full = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
@@ -643,16 +610,18 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       h.onSpeechStart()
     }
     diag.dropped = ''
-    // Show the whole thought, not just the fragment being spoken now — there
-    // may be an earlier half of it held by the assembler.
-    const carried = assemble.held()
-    h.onPartial(carried ? `${carried} ${full}` : full)
+    // Keep all accepted fragments visible until the single silence deadline.
+    h.onPartial(full)
     bumpSilence()
   }
 
   const spin = () => {
     if (stopped || running) return
     rec = new Ctor()
+    const current = rec
+    consumedThrough = -1
+    lastResultIndex = -1
+    finalResults.clear()
     rec.continuous = true
     rec.interimResults = true
     rec.lang = 'en-GB'
@@ -662,16 +631,36 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       diag.sessions++
       touch()
     }
-    rec.onresult = onResult
+    rec.onresult = (event: any) => { if (rec === current) onResult(event) }
+    rec.onspeechstart = () => {
+      if (stopped || rec !== current) return
+      touch()
+      speechActive = true
+      speechEnded = false
+      quietAt = null
+      clearSilence()
+    }
+    rec.onspeechend = () => {
+      if (stopped || rec !== current) return
+      touch()
+      if (!speechEnded && (speechActive || quietAt === null)) quietAt = performance.now()
+      speechActive = false
+      speechEnded = true
+      bumpSilence()
+    }
     rec.onerror = (ev: any) => {
       diag.lastError = String(ev.error ?? '')
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         stopped = true
+        clearSilence()
         diag.running = false
         h.onError('Microphone access was refused — voice input is unavailable.')
       }
     }
     rec.onend = () => {
+      if (rec !== current) return
+      speechActive = false
+      bumpSilence()
       running = false
       diag.running = false
       touch()
@@ -713,7 +702,6 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       stopped = true
       clearInterval(health)
       clearSilence()
-      assemble.cancel()
       diag.running = false
       try {
         rec?.abort()
