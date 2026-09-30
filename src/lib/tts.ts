@@ -34,6 +34,28 @@ type Speaker = {
   markModelDelta: () => void
 }
 
+// UI-only playback observation. No rendering runs in the audio callback.
+let playbackActive = false
+let playbackNotificationPending = false
+const playbackListeners = new Set<() => void>()
+export const isPlaybackActive = () => playbackActive
+export function subscribePlayback(listener: () => void) {
+  playbackListeners.add(listener)
+  return () => { playbackListeners.delete(listener) }
+}
+function setPlaybackActive(active: boolean) {
+  if (active === playbackActive) return
+  playbackActive = active
+  if (playbackNotificationPending || !playbackListeners.size) return
+  playbackNotificationPending = true
+  void Promise.resolve().then(() => {
+    playbackNotificationPending = false
+    for (const listener of playbackListeners) {
+      try { listener() } catch { /* A visual subscriber cannot interrupt speech. */ }
+    }
+  })
+}
+
 // ---------------------------------------------------------------------------
 // What he is saying right now
 // ---------------------------------------------------------------------------
@@ -371,6 +393,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
   let buffer = ''
   let cancelled = false
   let outLevel = 0
+  let readOutput: (() => number) | null = null
   let pumping = false
   let playingAudio = false
   let fishFailed = false
@@ -677,20 +700,6 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       // as a film-trailer voiceover, which is the wrong character entirely.
       u.pitch = 0.95
 
-      // speechSynthesis exposes no amplitude, so drive the reactor from a
-      // synthetic envelope. It only has to look like speech, not match it.
-      let raf = 0
-      let t = 0
-      const tick = () => {
-        t += 0.08
-        outLevel =
-          0.35 +
-          Math.abs(Math.sin(t * 2.1)) * 0.3 +
-          Math.abs(Math.sin(t * 5.7)) * 0.2
-        raf = requestAnimationFrame(tick)
-      }
-      tick()
-
       let done = false
       let started = false
       let watchdog: ReturnType<typeof setTimeout> | null = null
@@ -704,16 +713,16 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         u.onstart = null; u.onend = null; u.onerror = null
         if (watchdog) clearTimeout(watchdog)
         if (keepalive) clearInterval(keepalive)
-        cancelAnimationFrame(raf)
-        // Held rather than zeroed, so the orb doesn't collapse in the gap
-        // between two sentences of the same answer.
-        outLevel = 0.12
+        outLevel = 0
+        setPlaybackActive(false)
         // The whole point of the boolean: `true` only if sound actually began.
         resolve(started)
       }
 
       u.onstart = () => {
         if (done || cancelled) return
+        outLevel = 0.4
+        setPlaybackActive(true)
         if (model) {
           mark('firstAudioReadyMs')
           mark('firstAudibleMs')
@@ -800,7 +809,6 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       diag.lastText = text.slice(0, 60)
       diag.voice = diag.engine === 'fish' ? 'Fish Audio' : kokoro.activeVoice()
 
-      let read: (() => number) | null = null
       const nodes: AudioNode[] = []
       const ctx = outputContext()
       if (ctx) {
@@ -827,7 +835,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
           ceiling.curve = curve
           source.connect(presence).connect(compressor).connect(gain).connect(ceiling).connect(analyser).connect(ctx.destination)
           const bins = new Uint8Array(analyser.frequencyBinCount)
-          read = () => {
+          readOutput = () => {
             analyser.getByteFrequencyData(bins as Uint8Array<ArrayBuffer>)
             let sum = 0
             for (let i = 2; i < bins.length; i++) sum += bins[i]
@@ -837,13 +845,6 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
           /* the analyser is a nice-to-have */
         }
       }
-
-      let raf = 0
-      const tick = () => {
-        outLevel = read ? read() : 0.4
-        raf = requestAnimationFrame(tick)
-      }
-      tick()
 
       let done = false
       let started = false
@@ -862,14 +863,15 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (finishPlayback === finish) finishPlayback = null
         item.failPlayback = undefined
         clearTimeout(watchdog)
-        cancelAnimationFrame(raf)
-        audio.onplaying = null; audio.onended = null; audio.oncanplay = null; audio.onerror = null; audio.onpause = null
+        audio.onplaying = null; audio.onended = null; audio.oncanplay = null; audio.onerror = null; audio.onpause = null; audio.onwaiting = null
         audio.pause()
         audio.removeAttribute('src')
         audio.load()
         for (const node of nodes) node.disconnect()
         item.dispose?.()
-        outLevel = 0.12
+        outLevel = 0
+        readOutput = null
+        setPlaybackActive(false)
         URL.revokeObjectURL(url)
         if (currentAudio === audio) currentAudio = null
         resolve(started && !failed)
@@ -878,7 +880,10 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       // SpeechSynthesisUtterance.onstart, and it is what makes the diagnostics
       // verdict — and the T self-test — tell the truth on the premium path.
       audio.onplaying = () => {
-        if (done || cancelled || started) return
+        if (done || cancelled) return
+        outLevel = 0.4
+        setPlaybackActive(true)
+        if (started) return
         started = true
         item.stages.playbackStart = Math.round(performance.now() - queuedAt)
         if (previousEnd) {
@@ -893,6 +898,7 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
         if (!diag.bestStartLatencyMs || diag.lastStartLatencyMs < diag.bestStartLatencyMs) diag.bestStartLatencyMs = diag.lastStartLatencyMs
         diag.lastError = ''
       }
+      audio.onwaiting = () => { if (!done) { outLevel = 0; setPlaybackActive(false) } }
       audio.onended = () => { previousEnd = performance.now(); finish() }
       // canplay means enough data has decoded to start, not that the entire
       // streamed MP3 has been decoded.
@@ -976,9 +982,11 @@ export function createSpeaker(context: SpeechContext = {}): Speaker {
       }
       finishPlayback?.()
       outLevel = 0
+      readOutput = null
+      setPlaybackActive(false)
       settleDrained()
     },
-    level: () => outLevel,
+    level: () => outLevel ? (readOutput?.() ?? outLevel) : 0,
     markModelDelta: () => mark('firstModelDeltaMs'),
   }
   activeSpeaker = speaker

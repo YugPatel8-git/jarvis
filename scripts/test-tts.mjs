@@ -127,13 +127,73 @@ function speakerHarness({ fish = false, kokoroFails = false, fishDecodeFails = f
     },
     URL: { revokeObjectURL(url) { revoked.push(url) }, createObjectURL: () => 'blob:fish-test' },
     setTimeout: (fn, ms, ...args) => setTimeout(fn, (audioHangs && ms === 45_000) || (fetchImpl && ms === 20_000) || (nativeFirstHangs && ms === 700) ? 15 : ms, ...args), clearTimeout, setInterval, clearInterval,
-    requestAnimationFrame: () => 1,
+    requestAnimationFrame: () => { throw new Error('TTS must not schedule a visual frame loop') },
     cancelAnimationFrame() {},
     console,
   }
   vm.runInNewContext(compiled, context, { filename: 'tts.js' })
-  return { createSpeaker: exports.createSpeaker, diag: exports.diag, utterances, played, audioPlayed, localSyntheses, revoked, audios, mediaSources, get loads() { return loads }, get fishRequests() { return fishRequests } }
+  return { createSpeaker: exports.createSpeaker, isPlaybackActive: exports.isPlaybackActive, subscribePlayback: exports.subscribePlayback, diag: exports.diag, utterances, played, audioPlayed, localSyntheses, revoked, audios, mediaSources, get loads() { return loads }, get fishRequests() { return fishRequests } }
 }
+
+test('playback indicator waits for actual audio, handles buffering, and clears on cancel', async () => {
+  const h = speakerHarness({ fish: true, holdAudio: true })
+  const changes = []
+  const unsubscribe = h.subscribePlayback(() => changes.push(h.isPlaybackActive()))
+  const speaker = h.createSpeaker()
+  try {
+    speaker.say('At your service.')
+    assert.equal(h.isPlaybackActive(), false, 'queued speech is not audible speech')
+    await new Promise((r) => setTimeout(r, 15))
+    assert.equal(h.isPlaybackActive(), true)
+    assert.deepEqual(changes, [true])
+    const audio = h.audios.at(-1)
+    audio.onwaiting()
+    assert.equal(h.isPlaybackActive(), false)
+    await Promise.resolve()
+    audio.onplaying()
+    await Promise.resolve()
+    assert.equal(h.diag.started, 1, 'resuming does not recount the phrase')
+    const staleStart = audio.onplaying
+    speaker.cancel()
+    assert.equal(h.isPlaybackActive(), false, 'cancel clears the snapshot synchronously')
+    assert.equal(speaker.level(), 0)
+    staleStart()
+    await speaker.end()
+    assert.equal(h.isPlaybackActive(), false, 'a stale callback cannot relight the ring')
+    assert.deepEqual(changes, [true, false, true, false])
+  } finally { speaker.cancel(); unsubscribe() }
+})
+
+test('native playback notifies asynchronously and visual failures cannot break speech', async () => {
+  const h = speakerHarness()
+  const changes = []
+  const broken = h.subscribePlayback(() => { throw new Error('visual failure') })
+  const unsubscribe = h.subscribePlayback(() => changes.push(h.isPlaybackActive()))
+  const speaker = h.createSpeaker()
+  try {
+    speaker.say('Ready.')
+    assert.deepEqual(changes, [], 'no rendering before speech starts')
+    await speaker.end()
+    await Promise.resolve()
+    assert.deepEqual(h.played, ['Ready.'])
+    assert.deepEqual(changes, [true, false])
+    assert.equal(h.isPlaybackActive(), false)
+  } finally { speaker.cancel(); unsubscribe(); broken() }
+})
+
+test('audio end clears the indicator before the remaining turn finishes', async () => {
+  const h = speakerHarness({ fish: true, holdAudio: true })
+  const speaker = h.createSpeaker()
+  try {
+    speaker.say('Ready.')
+    await new Promise((r) => setTimeout(r, 15))
+    assert.equal(h.isPlaybackActive(), true)
+    h.audios.at(-1).onended()
+    assert.equal(h.isPlaybackActive(), false)
+    assert.equal(speaker.level(), 0)
+    await speaker.end()
+  } finally { speaker.cancel() }
+})
 
 test('local speech queue plays each phrase once in order', async () => {
   const { createSpeaker, utterances, played } = speakerHarness()

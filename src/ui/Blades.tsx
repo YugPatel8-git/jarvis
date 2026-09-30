@@ -1,38 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
 import { useStore, type Blade } from '../store'
 import { BRIDGE_HTTP_URL } from '../config'
 import { sanitisePanelHtml } from './sanitise'
 import { frameSpan, peaceScroll, pinchCount } from '../lib/hands'
 import * as camera from '../lib/camera'
 
-/**
- * The blades.
- *
- * This file used to be six slivers of light raking across the frame while a
- * tool ran — pure atmosphere, nothing you could read. That effect is still
- * here, at the bottom, because it is still the right answer to "something is
- * happening". But the name now belongs to the surface it was decorating.
- *
- * A panel is a card you glance at while listening: a figure, three headlines, a
- * status line. A blade is the thing you actually look at. The distinction is
- * not styling, it is geometry — an article you are meant to READ needs a column
- * of a particular width and a height you can scroll, and no amount of care
- * makes that work inside a 320px card stacked beside the reactor. So blades own
- * their size, they stack instead of replacing one another, and the user can
- * pull an older one forward or throw one to full screen.
- *
- * The hard problem a blade solves is that most of the web refuses to be shown.
- * X-Frame-Options and frame-ancestors stop an article being framed, CORS stops
- * the page fetching it, and hotlink protection stops even its images loading.
- * All three are rules the origin server enforces against the *browser*, so the
- * bridge takes the browser out of it: it fetches server-side and serves the
- * result from localhost, and at that point the document in the iframe is ours.
- *
- * Nothing in this file is a special case for a particular site, and nothing
- * here sniffs a file extension. The model asks `probe_url` what a thing is and
- * says what it wants shown; this only knows how to show it.
- */
+/** Content panels: articles, media, camera, and sanitised tool markup. */
 
 /* ------------------------------------------------------------------ sources */
 
@@ -259,7 +232,8 @@ function Card({
   const [size, setSize] = useState<{ w: number; h: number } | null>(null)
   /** Where the user has dragged it, relative to its slot. */
   const [pos, setPos] = useState({ x: 0, y: 0 })
-  const shell = useRef<HTMLDivElement>(null)
+  const gestures = useStore((s) => s.gestures)
+  const shell = useRef<HTMLElement>(null)
   const body = useRef<HTMLDivElement>(null)
 
   /**
@@ -382,7 +356,7 @@ function Card({
    * the tracker publishes the pose, not the consequence.
    */
   useEffect(() => {
-    if (!focused) return
+    if (!focused || !gestures) return
     let raf = 0
     let last: number | null = null
     const tick = () => {
@@ -403,7 +377,7 @@ function Card({
     }
     tick()
     return () => cancelAnimationFrame(raf)
-  }, [focused])
+  }, [focused, gestures])
 
   /**
    * Frame the blade with both hands to resize it.
@@ -424,7 +398,7 @@ function Card({
    * size is the entire point of the state.
    */
   useEffect(() => {
-    if (!focused || expanded) return
+    if (!focused || expanded || !gestures) return
     let raf = 0
     let from: { span: number; w: number; h: number } | null = null
     const tick = () => {
@@ -451,7 +425,7 @@ function Card({
     }
     tick()
     return () => cancelAnimationFrame(raf)
-  }, [focused, expanded])
+  }, [focused, expanded, gestures])
 
   const onGrip = (e: React.PointerEvent) => {
     const box = shell.current?.getBoundingClientRect()
@@ -475,39 +449,18 @@ function Card({
    * always crosses.
    */
   return (
-    /**
-     * Two elements, because two different things want the transform.
-     *
-     * The outer one carries the depth offset — the small lift and scale that
-     * makes the stack read as objects rather than as a list. The inner one is
-     * what the user drags. Framer owns `transform` on anything it animates, so
-     * with both jobs on one element the drag and the stack animation overwrite
-     * each other every frame and the blade jitters back to its slot.
-     */
-    <motion.div
-      className="bl-slot"
-      initial={{ opacity: 0, y: 26, scale: 0.96, filter: 'blur(6px)' }}
-      animate={{
-        opacity: expanded || depth === 0 ? 1 : Math.max(0.3, 1 - depth * 0.24),
-        y: expanded ? 0 : depth * -13,
-        x: expanded ? 0 : depth * 15,
-        scale: expanded ? 1 : 1 - depth * 0.035,
-        filter: depth === 0 || expanded ? 'blur(0px)' : `blur(${depth * 0.7}px)`,
-      }}
-      exit={{ opacity: 0, y: 18, filter: 'blur(8px)', transition: { duration: 0.28 } }}
-      transition={{ type: 'spring', stiffness: 260, damping: 30 }}
-      style={{ zIndex: expanded ? 60 : 40 - depth }}
-    >
-      <motion.section
+    <div className="bl-slot" style={{ zIndex: expanded ? 60 : 40 - depth,
+      transform: expanded ? undefined : `translate(${depth * 12}px, ${depth * -12}px)` }}>
+      <section
         ref={shell}
         className={
           `bl bl-${blade.size}` +
           (expanded ? ' bl-expanded' : '') +
           (focused ? ' bl-front' : '')
         }
-        // Position and size are ours rather than framer's — see `grab` above for
-        // why. Applied as a plain transform because the depth animation lives on
-        // the slot wrapper, so nothing is competing for this element's own one.
+        // Position and size follow the existing drag and resize handlers; see `grab` for
+        // why. The static stack offset lives on the slot wrapper, independently
+        // of this element's drag position.
         style={{
           ...(size && !expanded ? { width: size.w, height: size.h } : null),
           transform: expanded ? undefined : `translate(${pos.x}px, ${pos.y}px)`,
@@ -519,10 +472,6 @@ function Card({
           if (!focused) onFocus()
         }}
       >
-        <span className="pk pk-tl" />
-        <span className="pk pk-tr" />
-        <span className="pk pk-bl" />
-        <span className="pk pk-br" />
 
         <header className="bl-head" onPointerDown={onHeadDown}>
           <span className="bl-title">{blade.title}</span>
@@ -570,8 +519,8 @@ function Card({
 
         {/* Resize grip. Absent while expanded, where the size is the point. */}
         {!expanded && <span className="bl-grip" onPointerDown={onGrip} title="Drag to resize" />}
-      </motion.section>
-    </motion.div>
+      </section>
+    </div>
   )
 }
 
@@ -616,12 +565,9 @@ export function Blades() {
 
   // Bound here rather than in App, and only while something is open, so E and X
   // are free for anything else the moment the last blade closes.
-  const live = useRef(false)
-  live.current = blades.length > 0
-
   useEffect(() => {
+    if (!blades.length) return
     const onKey = (e: KeyboardEvent) => {
-      if (!live.current) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
       if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
@@ -642,13 +588,12 @@ export function Blades() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [front, expandedBlade, expandBlade, closeBlade, cycle])
+  }, [blades.length, front, expandedBlade, expandBlade, closeBlade, cycle])
 
   if (!blades.length) return null
 
   return (
     <div className={`blades-stack${expandedBlade ? ' blades-stack-full' : ''}`}>
-      <AnimatePresence>
         {ordered.map((blade, i) => {
           const expanded = expandedBlade === blade.id
           // While one is expanded it is the only thing on screen; the rest are
@@ -667,7 +612,6 @@ export function Blades() {
             />
           )
         })}
-      </AnimatePresence>
 
       {blades.length > 1 && !expandedBlade && (
         <div className="bl-hint">
@@ -675,57 +619,5 @@ export function Blades() {
         </div>
       )}
     </div>
-  )
-}
-
-/* --------------------------------------------------------------- the sweep */
-
-/**
- * The original blades: slivers of light raking across the frame while a tool
- * runs. Unchanged, because it is still the right answer to "something is
- * happening" — a tool call is the one moment the interface stops being a face
- * and becomes machinery, and the reactor cannot carry that on its own.
- *
- * Deliberately CSS rather than three.js: the scene is bloomed and tone-mapped,
- * which is exactly wrong for a 1px edge. Kept in the DOM it stays a blade.
- */
-const SWEEP = [1, 2, 3, 4, 5, 6]
-
-export function BladeSweep() {
-  const phase = useStore((s) => s.phase)
-  const activeTool = useStore((s) => s.activeTool)
-
-  return (
-    <AnimatePresence>
-      {phase === 'tooling' && (
-        <motion.div
-          className="blades"
-          // Only opacity is animated here. The sweeps are CSS keyframes on the
-          // children, and framer writes `transform` inline on anything it
-          // animates — one transform prop in this list and every blade would be
-          // sliding inside an element that is itself sliding.
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.3, ease: 'easeOut' }}
-        >
-          <div className="blade-field">
-            {SWEEP.map((n) => (
-              <span key={n} className={`blade blade-${n}`} />
-            ))}
-          </div>
-
-          {activeTool && (
-            // Keyed on the name so a chain of tools re-runs the ride-in for
-            // each one rather than silently swapping the text mid-sweep.
-            <div className="blade-carrier">
-              <span key={activeTool} className="blade-tool">
-                {activeTool}
-              </span>
-            </div>
-          )}
-        </motion.div>
-      )}
-    </AnimatePresence>
   )
 }

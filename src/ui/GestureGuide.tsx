@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
 import { diag } from '../lib/hands'
 
 /**
@@ -27,19 +26,13 @@ const MOVES: { gesture: string; hand: string; does: string }[] = [
 /** How long the legend stays after the first successful press. */
 const DISMISS_MS = 1400
 
-export function GestureGuide({ live }: { live: boolean }) {
-  const [show, show_] = useState(false)
+export function GestureGuide() {
+  const [show, show_] = useState(true)
   const used = useRef(false)
   const poll = useRef(0)
+  const dismiss = useRef(0)
 
   useEffect(() => {
-    if (!live) {
-      show_(false)
-      used.current = false
-      return
-    }
-    show_(true)
-
     // Polled rather than subscribed: the tracker publishes a plain mutable
     // object on purpose, so that the loop's timing is not at the mercy of
     // React. Four times a second is plenty to notice a first pinch.
@@ -47,22 +40,17 @@ export function GestureGuide({ live }: { live: boolean }) {
       if (used.current) return
       if (diag.gesture.includes('pinch')) {
         used.current = true
-        window.setTimeout(() => show_(false), DISMISS_MS)
+        window.clearInterval(poll.current)
+        dismiss.current = window.setTimeout(() => show_(false), DISMISS_MS)
       }
     }, 250)
-    return () => window.clearInterval(poll.current)
-  }, [live])
+    return () => { window.clearInterval(poll.current); window.clearTimeout(dismiss.current) }
+  }, [])
 
   return (
-    <AnimatePresence>
+    <>
       {show && (
-        <motion.div
-          className="gguide"
-          initial={{ opacity: 0, y: 10, filter: 'blur(6px)' }}
-          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-          exit={{ opacity: 0, y: 8, filter: 'blur(6px)', transition: { duration: 0.5 } }}
-          transition={{ type: 'spring', stiffness: 260, damping: 28 }}
-        >
+        <div className="gguide">
           <div className="gguide-head">HAND CONTROL</div>
           {MOVES.map((m) => (
             <div key={m.gesture} className="gguide-row">
@@ -74,8 +62,8 @@ export function GestureGuide({ live }: { live: boolean }) {
           <div className="gguide-foot">
             grab a blade by its bar · <kbd>G</kbd> to stop
           </div>
-        </motion.div>
+        </div>
       )}
-    </AnimatePresence>
+    </>
   )
 }

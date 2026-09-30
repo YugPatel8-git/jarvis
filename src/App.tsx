@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react'
-import { Scene } from './scene/Scene'
 import { Hud } from './ui/Hud'
 import { Diagnostics } from './ui/Diagnostics'
 import { useStore } from './store'
@@ -27,7 +26,7 @@ import {
   isConnected,
   type Msg,
 } from './lib/brain'
-import { startAnalyser, micLevel, releaseMic } from './lib/audio'
+import { startAnalyser, releaseMic } from './lib/audio'
 import { probeCapabilities } from './lib/capabilities'
 
 /**
@@ -435,31 +434,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // -- level pump + keys ----------------------------------------------------
+  // -- keyboard controls ----------------------------------------------------
 
   useEffect(() => {
-    let raf = 0
-    let lastLevel = -1
-    let lastLevelAt = 0
-
-    const pump = () => {
-      const st = store.getState()
-      // While speaking, follow JARVIS's own output rather than the mic, so the
-      // orb lip-syncs instead of reacting to room noise.
-      const lvl =
-        st.phase === 'speaking' && speaker.current
-          ? speaker.current.level()
-          : micLevel()
-      const now = performance.now()
-      if (now - lastLevelAt >= 32 && (Math.abs(lvl - lastLevel) >= 0.015 || now - lastLevelAt >= 250)) {
-        st.setLevel(lvl)
-        lastLevel = lvl
-        lastLevelAt = now
-      }
-      raf = requestAnimationFrame(pump)
-    }
-    pump()
-
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
@@ -551,7 +528,6 @@ export default function App() {
     window.addEventListener('keydown', onKey)
 
     return () => {
-      cancelAnimationFrame(raf)
       window.removeEventListener('keydown', onKey)
       clearIdle()
       if (voicePoll.current) clearInterval(voicePoll.current)
@@ -567,8 +543,7 @@ export default function App() {
 
   return (
     <>
-      <Scene />
-      <Hud onTalk={activateVoice} />
+      <Hud onTalk={activateVoice} onStop={goDormant} />
       <Diagnostics />
     </>
   )
