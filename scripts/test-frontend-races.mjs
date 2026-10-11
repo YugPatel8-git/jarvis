@@ -66,15 +66,57 @@ test('rapid questions during bridge connection keep only the latest turn and can
   })
   try {
     const handlers = { onText() {}, onTool() {} }
-    const asks = Array.from({ length: 10 }, (_, i) => exports.ask(`Question ${i}`, handlers))
+    const asks = Array.from({ length: 10 }, (_, i) => exports.ask(`Question ${i}`, handlers, {rawChunks:[` Question ${i} `]}))
     assert.equal(instances.length, 1)
     const ws = instances[0]
     ws.readyState = 1; ws.onopen()
     await new Promise((r) => setImmediate(r))
     assert.equal(ws.sent.filter((m) => m.type === 'ask').length, 1)
     assert.equal(ws.sent.find((m) => m.type === 'ask').text, 'Question 9')
+    assert.deepEqual(ws.sent.find((m) => m.type === 'ask').speech.rawChunks, [' Question 9 '])
     exports.cancel()
     await Promise.all(asks)
     assert.equal(ws.listeners.get('message').size, 1, 'only the connection dispatcher remains')
   } finally { for (const t of timers) clearTimeout(t) }
+})
+
+test('voice handoff retains raw chunks in the turn and passes them through brain to the bridge', async () => {
+  const timers = new Set(), calls = [], turns = []
+  let voiceHandlers
+  const state = new Proxy({phase:'dormant',setPhase(value){this.phase=value},pushTurn(turn){turns.push(turn)}}, {get:(obj,key)=>obj[key]??(()=>{})})
+  const brain = {}
+  vm.runInNewContext(compile('../src/lib/brain.ts'), {
+    exports:brain,require:()=>({ask:async(...args)=>calls.push(args)}),
+  })
+  const app = {}
+  const timer = (fn, ms) => {const value=setTimeout(fn,ms);timers.add(value);return value}
+  vm.runInNewContext(compile('../src/App.tsx'), {
+    exports:app,performance,crypto,console,setTimeout:timer,clearTimeout,
+    require(id){
+      if(id==='react')return {useRef:value=>({current:value}),useEffect(){}}
+      if(id==='react/jsx-runtime')return {jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})}
+      if(id==='./store')return {useStore:{getState:()=>state}}
+      if(id==='./lib/voice')return {startVoice:async handlers=>{voiceHandlers=handlers;return {live:()=>true,stop(){}}}}
+      if(id==='./lib/brain')return brain
+      if(id==='./lib/tts')return {createSpeaker:()=>({end:async()=>{},cancel(){}}),prewarmSpeech(){}}
+      if(id==='./lib/capabilities')return {probeCapabilities:async()=>({})}
+      if(id==='./lib/audio')return {startAnalyser:async()=>{}}
+      if(id==='./lib/screen')return {diag:{visionRequestAt:0}}
+      if(id==='./ui/Hud')return {Hud:'Hud'}
+      return new Proxy({}, {get:()=>()=>{}})
+    },
+  })
+  try {
+    const tree=app.default()
+    tree.props.children.find(node=>node.type==='Hud').props.onTalk()
+    await new Promise(resolve=>setImmediate(resolve))
+    const speech={rawChunks:['  open ', 'visual studio cold  ']}
+    voiceHandlers.onUtterance('open visual studio cold',speech)
+    await new Promise(resolve=>setImmediate(resolve))
+    assert.equal(calls.length,1)
+    assert.equal(calls[0][0],'open visual studio cold')
+    assert.deepEqual(calls[0][2].rawChunks,speech.rawChunks)
+    assert.equal(turns[0].text,'open visual studio cold')
+    assert.deepEqual(turns[0].rawSpeech,speech.rawChunks)
+  } finally {for(const t of timers)clearTimeout(t)}
 })

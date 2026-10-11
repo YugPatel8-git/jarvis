@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
+import * as speechVocabulary from '../shared/speech-vocabulary.mjs'
 
 const compile = file => ts.transpileModule(readFileSync(new URL(`../src/lib/${file}.ts`, import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -45,12 +46,12 @@ function clock() {
   }
 }
 
-async function harness({ premium = false, guard = false } = {}) {
-  const time = clock(), turns = [], partials = [], requests = [], recognizers = []
+async function harness({ premium = false, guard = false, hints = false } = {}) {
+  const time = clock(), turns = [], partials = [], requests = [], recognizers = [], speechInputs = []
   let mode = guard ? 'guard' : 'command', oldSpeech = guard, interruptions = 0, vadHandlers, speaking = false
   class Recognition {
     results = []
-    constructor() { recognizers.push(this) }
+    constructor() { recognizers.push(this); if (hints) this.phrases = [] }
     start() { this.onstart?.() }
     abort() { this.onend?.() }
     result(text, { index = this.results.length, final = true } = {}) {
@@ -62,8 +63,9 @@ async function harness({ premium = false, guard = false } = {}) {
   const exports = {}
   vm.runInNewContext(voiceSource, {
     exports, ...time.globals, console, Blob,
-    window: { SpeechRecognition: Recognition },
+    window: { SpeechRecognition: Recognition, ...(hints ? {SpeechRecognitionPhrase: class {constructor(phrase, boost){Object.assign(this,{phrase,boost})}}} : {}) },
     require(id) {
+      if (id === '../../shared/speech-vocabulary.mjs') return speechVocabulary
       if (id === '../config') return { BRIDGE_HTTP_URL: 'http://test' }
       if (id === './audio') return { getMic: async () => ({}) }
       if (id === './capabilities') return { caps: () => ({ stt: premium }) }
@@ -80,11 +82,11 @@ async function harness({ premium = false, guard = false } = {}) {
     mode: () => mode,
     onSpeechStart: () => { interruptions++; oldSpeech = false; mode = 'command' },
     onPartial: text => partials.push(text),
-    onUtterance: text => turns.push({ text, at: time.now }),
+    onUtterance: (text, speech) => { turns.push({ text, at: time.now }); speechInputs.push(speech) },
     onError: message => assert.fail(message),
   })
   return {
-    time, turns, voice, requests, partials, recognizers,
+    time, turns, voice, requests, partials, recognizers, speechInputs, diag: exports.diag,
     get rec() { return recognizers.at(-1) },
     get interruptions() { return interruptions }, get oldSpeech() { return oldSpeech },
     begin() { speaking = true; vadHandlers.onActivity(true); vadHandlers.onStart() },
@@ -232,6 +234,44 @@ test('withdrawing all interim results cancels submission and allows a replacemen
   h.rec.result('Yes', { index: 0 })
   await h.time.advance(900)
   assert.deepEqual(h.turns.map(t => t.text), ['Yes'])
+  h.voice.stop()
+})
+
+test('unsupported phrase hints disable on restart while the pending transcript survives', async () => {
+  const h = await harness({ hints: true })
+  assert.equal(h.rec.phrases.length, speechVocabulary.TERMS.length)
+  h.rec.result('Please open', { final: false })
+  h.rec.onerror({error:'phrases-not-supported'})
+  h.rec.onend()
+  await h.time.advance(80)
+  assert.equal(h.rec.phrases.length, 0)
+  h.rec.result('Chrome')
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(turn=>turn.text), ['Please open Chrome'])
+  h.voice.stop()
+})
+
+test('browser raw chunks survive whitespace assembly and restart without leaking credentials to diagnostics', async () => {
+  const h = await harness()
+  h.rec.result('  my password ', { final: false })
+  h.rec.onend()
+  await h.time.advance(80)
+  h.rec.result('is   a-secret  ')
+  await h.time.advance(900)
+  assert.deepEqual(Array.from(h.speechInputs[0].rawChunks), ['  my password ', 'is   a-secret  '])
+  assert.equal(h.diag.heard, '[REDACTED]')
+  h.voice.stop()
+})
+
+test('Scribe preserves the exact segment text while diagnostics redact credentials', async () => {
+  const h = await harness({ premium: true })
+  h.begin(); await h.time.advance(300); h.quiet()
+  await h.time.advance(650); h.end()
+  await h.transcribed('  my password is   a-secret  ')
+  assert.equal(h.diag.heard, '[REDACTED]')
+  assert.equal(h.diag.holding, '[REDACTED]')
+  await h.time.advance(250)
+  assert.deepEqual(Array.from(h.speechInputs[0].rawChunks), ['  my password is   a-secret  '])
   h.voice.stop()
 })
 

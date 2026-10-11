@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Hud } from './ui/Hud'
 import { Diagnostics } from './ui/Diagnostics'
 import { useStore } from './store'
-import { startVoice, type Voice, type VoiceMode } from './lib/voice'
+import { startVoice, type Voice, type VoiceMode, type SpeechInput } from './lib/voice'
 import { createSpeaker, cycleVoice, currentVoiceName, prewarmSpeech } from './lib/tts'
 import { wantsLiteralTechnicalSpeech } from './lib/speech-text'
 import * as sfx from './lib/sfx'
@@ -114,7 +114,7 @@ export default function App() {
 
   // -- one turn -------------------------------------------------------------
 
-  const respond = async (said: string): Promise<void> => {
+  const respond = async (said: string, speech?: SpeechInput): Promise<void> => {
     silence()
     const mine = ++turn.current
     const turnStartedAt = performance.now()
@@ -127,7 +127,7 @@ export default function App() {
     s.clearPanels()
     s.clearBlades()
     s.setCaption('')
-    s.pushTurn({ id: newId(), role: 'user', text: said })
+    s.pushTurn({ id: newId(), role: 'user', text: said, rawSpeech: speech?.rawChunks })
     s.setPhase('thinking')
 
     const spk = createSpeaker({ literalTechnical: wantsLiteralTechnicalSpeech(said) })
@@ -174,7 +174,7 @@ export default function App() {
           store.getState().setActiveTool(name)
           sfx.play('tool')
         },
-      })
+      }, speech)
 
       if (stale()) return
 
@@ -242,7 +242,7 @@ export default function App() {
     store.getState().setPhase('listening')
   }
 
-  const onUtterance = (text: string) => {
+  const onUtterance = (text: string, speech?: SpeechInput) => {
     const phase = store.getState().phase
     if (phase === 'dormant') return
     const said = text.trim()
@@ -251,7 +251,7 @@ export default function App() {
       return
     }
 
-    void respond(said)
+    void respond(said, speech)
   }
 
   const onPartial = (text: string) => {

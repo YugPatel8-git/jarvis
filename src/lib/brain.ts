@@ -1,11 +1,12 @@
 import * as bridge from './bridge'
 import type { Blade, Panel } from '../store'
+import type { SpeechInput } from './voice'
 
 export type Msg = { role: 'user' | 'assistant'; content: string }
 export type AskHandlers = { onText: (delta: string) => void; onTool: (name: string) => void; onAck?: (text: string) => void }
 export type { ConnectionState } from './bridge'
 export const usingBridge = true
-export function ask(prompt: string, _history: Msg[], handlers: AskHandlers) { return bridge.ask(prompt, handlers) }
+export function ask(prompt: string, _history: Msg[], handlers: AskHandlers, speech?: SpeechInput) { return bridge.ask(prompt, handlers, speech) }
 export const warm = () => bridge.warmBridge()
 export const watchServers = (fn: (servers: string[]) => void) => bridge.watchServers(fn)
 export const watchPanels = (fn: (panel: Panel) => void) => bridge.watchPanels(fn)

@@ -53,6 +53,8 @@ export type Turn = {
   id: string
   role: 'user' | 'jarvis'
   text: string
+  /** Exact STT chunks retained in memory; never used as diagnostic output. */
+  rawSpeech?: string[]
   /** Tool names invoked while producing this turn, for the HUD readout. */
   tools?: string[]
 }

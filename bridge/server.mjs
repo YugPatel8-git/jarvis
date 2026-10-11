@@ -9,6 +9,7 @@ import { createRouter } from './router.mjs'
 import { matchFastPath } from './fast-path.mjs'
 import { FISH_MODEL, fishConfigured, fishSpeech } from './fish-tts.mjs'
 import { createHealth, diagnosticText } from './health.mjs'
+import { createSpeechContext, normalizeSpeech, readSpeechInput, speechPrompt } from './speech-normalization.mjs'
 
 // Read only Fish settings into a private object. Never add the key to
 // process.env: Codex, MCP, and shell child processes inherit that environment.
@@ -70,6 +71,7 @@ async function handle(req,res){
   if(req.method==='POST'&&req.url==='/stt'){
     const key=eleven();if(!key){res.writeHead(503,h);return res.end('ElevenLabs is not configured.')}
     const audio=await body(req,25*1024*1024), form=new FormData();form.append('model_id','scribe_v1');form.append('file',new Blob([audio],{type:req.headers['content-type']||'audio/webm'}),'speech.webm')
+    form.append('language_code','en')
     const up=await fetch('https://api.elevenlabs.io/v1/speech-to-text',{method:'POST',headers:{'xi-api-key':key},body:form});res.writeHead(up.status,{...h,'content-type':'application/json','cache-control':'no-store'});return res.end(await up.text())
   }
   res.writeHead(404,h);res.end()
@@ -120,6 +122,7 @@ wss.on('connection',(socket,req)=>{
   }
   frontend=socket;screenSharing=false;health.mark('frontend','ready');socket.send(JSON.stringify({type:'ready',servers:[conversation.state==='ready'?'ai-core-ready':conversation.state==='fallback'?'ai-core-fallback':'ai-core-warming','jarvis-tools','hud','vision']}))
   const seenAsks=new Set()
+  const speechContext=createSpeechContext()
   socket.on('message',(raw)=>{
     if(frontend!==socket)return
     let m;try{m=JSON.parse(raw)}catch{return}
@@ -135,20 +138,31 @@ wss.on('connection',(socket,req)=>{
     }
     if(conversation.busy)conversation.cancel();askId=typeof m.id==='string'?m.id:null
     const currentAsk=askId
-    if(/^(?:run diagnostics|what(?:'s| is) wrong with you|why are you slow|check your systems|are all systems healthy|recover yourself)[.!?]*$/i.test(m.text.trim())){
-      if(/^recover yourself/i.test(m.text.trim())&&conversation.state!=='ready')void conversation.warm().catch(()=>{})
+    const input=readSpeechInput(m.text,m.speech)
+    const speech=input?normalizeSpeech(input.rawTranscript,{terms:speechContext.terms(),screenSharing},input.rawChunks):null
+    if(speech?.clarification){
+      send({type:'route',engine:'local',ask:currentAsk})
+      send({type:'text',delta:speech.clarification,ask:currentAsk})
+      send({type:'done',text:speech.clarification,ask:currentAsk,local:true})
+      return
+    }
+    // Keep the raw input in the request record; only routing uses a high-confidence interpretation.
+    const requestText=speech?.normalizedTranscript??m.text
+    speechContext.remember(m.text)
+    if(/^(?:run diagnostics|what(?:'s| is) wrong with you|why are you slow|check your systems|are all systems healthy|recover yourself)[.!?]*$/i.test(requestText.trim())){
+      if(/^recover yourself/i.test(requestText.trim())&&conversation.state!=='ready')void conversation.warm().catch(()=>{})
       const spoken=diagnosticText(health.snapshot({pendingRequests:waiting.size,model:conversation.model}))
       send({type:'route',engine:'local',ask:currentAsk});send({type:'text',delta:spoken,ask:currentAsk,diagnostics:true});send({type:'done',text:spoken,ask:currentAsk,local:true});return
     }
-    if(/\bcan you see my screen\b/i.test(m.text)){
+    if(/\bcan you see my screen\b/i.test(requestText)){
       const spoken=screenSharing?'Your screen is being shared, sir. I can inspect it when you ask.':"Not yet, sir. Share your screen and I'll have a look."
       send({type:'route',engine:'local',ask:askId});send({type:'text',delta:spoken,ask:askId});send({type:'done',text:spoken,ask:askId,local:true});return
     }
-    if(!screenSharing&&screenQuestion(m.text)){
+    if(!screenSharing&&screenQuestion(requestText)){
       const spoken="Screen sharing is off, sir. Use the SCREEN OFF control to share a screen, window, or tab, then I'll have a look."
       send({type:'route',engine:'local',ask:askId});send({type:'text',delta:spoken,ask:askId});send({type:'done',text:spoken,ask:askId,local:true});return
     }
-    const fast=matchFastPath(m.text)
+    const fast=matchFastPath(requestText)
     if(fast){
       send({type:'route',engine:'local',ask:askId})
       send({type:'tool',name:`local ${fast.tool}`,ask:askId})
@@ -162,8 +176,9 @@ wss.on('connection',(socket,req)=>{
       return
     }
     send({type:'route',engine:'codex',ask:askId})
-    const prompt=screenSharing&&screenQuestion(m.text)?`${m.text}\n[The user is sharing a screen. For visible screen content, use the vision tool with source=screen before answering. Use browser read instead if accessible page text already answers the question. Screen observation does not authorize actions.]`:m.text
-    void conversation.ask(prompt).then(text=>send({type:'done',text,ask:currentAsk})).catch(e=>send({type:'error',message:String(e?.message??e),ask:currentAsk}))
+    const mainPrompt=speech?speechPrompt(speech):requestText
+    const prompt=screenSharing&&screenQuestion(requestText)?`${mainPrompt}\n[The user is sharing a screen. For visible screen content, use the vision tool with source=screen before answering. Use browser read instead if accessible page text already answers the question. Screen observation does not authorize actions.]`:mainPrompt
+    void conversation.ask(prompt).then(text=>{if(frontend===socket&&askId===currentAsk)speechContext.remember(text);send({type:'done',text,ask:currentAsk})}).catch(e=>send({type:'error',message:String(e?.message??e),ask:currentAsk}))
   })
   socket.on('close',()=>{if(frontend!==socket)return;frontend=null;screenSharing=false;health.mark('frontend','recovering');health.failure('frontend','disconnect');if(conversation.busy)conversation.cancel();for(const [id,p]of waiting){clearTimeout(p.timer);p.no(new Error('Interface disconnected.'));waiting.delete(id)}})
 })

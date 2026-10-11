@@ -1,5 +1,6 @@
 import process from 'node:process'
 import { resolve } from 'node:path'
+import { appCommand } from '../shared/speech-vocabulary.mjs'
 
 const clean = (text) => String(text ?? '').trim().replace(/[.!?]+$/,'')
 const result = (tool,args,spoken) => ({tool,args,spoken})
@@ -20,11 +21,11 @@ function say(kind) {
 }
 
 export function matchFastPath(input) {
-  const raw=clean(input), lower=raw.toLowerCase()
+  const raw=clean(input), lower=raw.toLowerCase(), app=appCommand(lower)
   let m
-  if(lower==='open chrome')return result('browser',{operation:'open',url:'https://www.google.com/'},say('chromeOpen'))
-  if(lower==='close chrome')return result('browser',{operation:'close_all'},say('chromeClose'))
-  if(lower==='open youtube')return result('browser',{operation:'open',url:'https://www.youtube.com/'},say('youtubeOpen'))
+  if(app==='open:chrome')return result('browser',{operation:'open',url:'https://www.google.com/'},say('chromeOpen'))
+  if(app==='close:chrome')return result('browser',{operation:'close_all'},say('chromeClose'))
+  if(app==='open:youtube')return result('browser',{operation:'open',url:'https://www.youtube.com/'},say('youtubeOpen'))
   if((m=/^(?:search google for|google)\s+(.+)$/i.exec(raw)))return result('browser',{operation:'search',query:m[1].trim()},`Searching Google for ${m[1].trim()}, sir.`)
   if((m=/^(?:search youtube for|youtube search(?: for)?)\s+(.+)$/i.exec(raw)))return result('browser',{operation:'youtube_search',query:m[1].trim()},`Searching YouTube for ${m[1].trim()}, sir.`)
   if((m=/^(?:open (?:this )?(?:url|website)|go to)\s+(https?:\/\/\S+)$/i.exec(raw)))return result('browser',{operation:'open',url:m[1]},'The page is open.')
@@ -34,11 +35,11 @@ export function matchFastPath(input) {
   if(lower==='scroll down')return result('browser',{operation:'scroll',y:700},'')
   if(lower==='scroll up')return result('browser',{operation:'scroll',y:-700},'')
 
-  if(lower==='open downloads'||lower==='open my downloads')return result('shell',{command:'explorer.exe',args:[resolve(process.env.USERPROFILE??'.','Downloads')]},'Downloads is open, sir.')
-  if(lower==='open vs code'||lower==='open visual studio code')return result('shell',{command:process.env.ComSpec??'C:\\Windows\\System32\\cmd.exe',args:['/d','/s','/c','code']},say('codeOpen'))
-  if(lower==='open notepad')return result('shell',{command:'notepad.exe',args:[]},'Notepad is open, sir.')
-  if(lower==='open calculator')return result('shell',{command:'calc.exe',args:[]},'Calculator is open.')
-  if(lower==='close vs code'||lower==='close visual studio code')return result('shell',{command:'taskkill.exe',args:['/im','Code.exe']},'VS Code is closed, sir.')
+  if(app==='open:downloads')return result('shell',{command:'explorer.exe',args:[resolve(process.env.USERPROFILE??'.','Downloads')]},'Downloads is open, sir.')
+  if(app==='open:code')return result('shell',{command:process.env.ComSpec??'C:\\Windows\\System32\\cmd.exe',args:['/d','/s','/c','code']},say('codeOpen'))
+  if(app==='open:notepad')return result('shell',{command:'notepad.exe',args:[]},'Notepad is open, sir.')
+  if(app==='open:calculator')return result('shell',{command:'calc.exe',args:[]},'Calculator is open.')
+  if(app==='close:code')return result('shell',{command:'taskkill.exe',args:['/im','Code.exe']},'VS Code is closed, sir.')
 
   if((m=/^open (?:the )?(?:file|folder)\s+(.+)$/i.exec(raw)))return result('filesystem',{operation:'open',path:m[1].trim()},'Opened.')
   if((m=/^create (?:a )?folder\s+(.+)$/i.exec(raw)))return result('filesystem',{operation:'mkdir',path:m[1].trim()},'The folder is ready, sir.')

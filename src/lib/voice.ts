@@ -3,6 +3,7 @@ import { getMic } from './audio'
 import { speakingNow, speakingSince } from './tts'
 import { startVad, type Vad } from './vad'
 import { caps } from './capabilities'
+import { applySpeechHints, diagnosticSpeech } from '../../shared/speech-vocabulary.mjs'
 
 /**
  * Manual voice loop. A recognizer starts only after Talk or Space and stays
@@ -18,6 +19,8 @@ export type VoiceMode =
   /** Something is playing that must not be transcribed at all. */
   | 'deaf'
 
+export type SpeechInput = { rawChunks: string[] }
+
 export type VoiceHandlers = {
   /** Read fresh on every result, so the app never has to re-subscribe. */
   mode: () => VoiceMode
@@ -26,7 +29,7 @@ export type VoiceHandlers = {
   /** Live transcript, for the caption under the reactor. */
   onPartial: (text: string) => void
   /** A complete, endpointed utterance. */
-  onUtterance: (text: string) => void
+  onUtterance: (text: string, speech?: SpeechInput) => void
   /** The recogniser is unusable. Distinct from the user saying nothing. */
   onError: (message: string) => void
 }
@@ -85,11 +88,12 @@ function silenceFor(text: string): number {
 }
 
 function makeAssembler(h: {
-  emit: (text: string) => void
+  emit: (text: string, speech: SpeechInput) => void
   partial: (text: string) => void
   busy: () => boolean
 }) {
   let held = ''
+  let rawChunks: string[] = []
   let active = false
   let quietAt = performance.now()
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -107,9 +111,11 @@ function makeAssembler(h: {
       timer = null
       if (active || h.busy()) return
       const text = held
+      const speech = { rawChunks }
+      rawChunks = []
       held = ''
       diag.holding = ''
-      if (text) h.emit(text)
+      if (text) h.emit(text, speech)
     }
     if (wait === 0) fire()
     else timer = setTimeout(fire, wait)
@@ -117,9 +123,10 @@ function makeAssembler(h: {
   return {
     feed(text: string) {
       if (!text.trim()) return
+      rawChunks.push(text)
       held = `${held} ${text}`.replace(/\s+/g, ' ').trim()
       h.partial(held)
-      diag.holding = held
+      diag.holding = diagnosticSpeech(held)
       schedule()
     },
     activity(value: boolean) {
@@ -131,6 +138,7 @@ function makeAssembler(h: {
     cancel() {
       clear()
       held = ''
+      rawChunks = []
       diag.holding = ''
     },
     held: () => held,
@@ -304,12 +312,12 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
    * See makeAssembler for why.
    */
   const assemble = makeAssembler({
-    emit: (text) => {
+    emit: (text, speech) => {
       if (stopped || h.mode() === 'deaf') return
       diag.dropped = ''
       diag.accepted++
       diag.holding = ''
-      h.onUtterance(text)
+      h.onUtterance(text, speech)
     },
     partial: (text) => h.onPartial(text),
     busy: () => draining || pendingAudio.length > 0 || (vad?.meter().speaking ?? false),
@@ -358,12 +366,12 @@ async function startElevenVoice(h: VoiceHandlers): Promise<Voice> {
         return
       }
 
-      diag.heard = said
+      diag.heard = diagnosticSpeech(said)
       diag.heardAt = Date.now()
 
       // Not a turn yet — a piece of one. The assembler decides when the thought
       // is finished, reading the words and whether the room is still noisy.
-      assemble.feed(said)
+      assemble.feed(text ?? '')
     } catch (err) {
       diag.restarts++
       diag.lastError = String(err)
@@ -490,6 +498,7 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
   let quietAt: number | null = null
   let consumedThrough = -1
   let lastResultIndex = -1
+  let hintsEnabled = true
 
   const touch = () => {
     lastAlive = Date.now()
@@ -512,6 +521,7 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
 
   const emit = () => {
     const text = transcript()
+    const speech = { rawChunks: [...carried, ...ordered()] }
     const mode = h.mode()
     consumedThrough = Math.max(consumedThrough, lastResultIndex)
     reset()
@@ -521,12 +531,12 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       drop('echo of his own voice')
       return
     }
-    diag.heard = text
+    diag.heard = diagnosticSpeech(text)
     diag.heardAt = Date.now()
     diag.dropped = ''
     diag.accepted++
     diag.holding = ''
-    h.onUtterance(text)
+    h.onUtterance(text, speech)
   }
 
   const bumpSilence = () => {
@@ -633,6 +643,7 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     rec.continuous = true
     rec.interimResults = true
     rec.lang = 'en-GB'
+    if (hintsEnabled) applySpeechHints(rec, (window as any).SpeechRecognitionPhrase)
     rec.onstart = () => {
       if (stopped || rec !== current) return
       running = true
@@ -659,6 +670,11 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     }
     rec.onerror = (ev: any) => {
       if (stopped || rec !== current) return
+      if (ev.error === 'phrases-not-supported') {
+        hintsEnabled = false
+        try { rec.phrases = [] } catch { /* next restart uses no hints */ }
+        return
+      }
       diag.lastError = String(ev.error ?? '')
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         stopped = true
