@@ -473,8 +473,13 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
   let stopped = false
   let running = false
   let rec: any = null
-  let settled = ''
-  let interim = ''
+  type ResultChunk = { text: string; final: boolean }
+  const results = new Map<number, ResultChunk>()
+  // Result indices restart at zero with each recognizer. Keep pending words
+  // from older sessions separately, in their original order.
+  const carried: string[] = []
+  const ordered = () => [...results].sort(([a], [b]) => a - b).map(([, chunk]) => chunk.text)
+  const transcript = () => [...carried, ...ordered()].join(' ').replace(/\s+/g, ' ').trim()
   let started = false
   let barged = false
   let lastAlive = Date.now()
@@ -485,7 +490,6 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
   let quietAt: number | null = null
   let consumedThrough = -1
   let lastResultIndex = -1
-  const finalResults = new Set<number>()
 
   const touch = () => {
     lastAlive = Date.now()
@@ -498,8 +502,8 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
 
   const reset = () => {
     clearSilence()
-    settled = ''
-    interim = ''
+    results.clear()
+    carried.length = 0
     started = false
     barged = false
     speechActive = false
@@ -507,10 +511,9 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
   }
 
   const emit = () => {
-    const text = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
+    const text = transcript()
     const mode = h.mode()
-    consumedThrough = lastResultIndex
-    finalResults.clear()
+    consumedThrough = Math.max(consumedThrough, lastResultIndex)
     reset()
     quietAt = null
     if (stopped || !text || mode === 'deaf') return
@@ -528,7 +531,7 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
 
   const bumpSilence = () => {
     clearSilence()
-    const text = `${settled} ${interim}`.trim()
+    const text = transcript()
     if (stopped || speechActive || !started || !text) return
     quietAt ??= performance.now()
     const wait = Math.max(0, silenceFor(text) - (performance.now() - quietAt))
@@ -543,46 +546,50 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     const mode = h.mode()
     diag.mode = mode
     if (mode === 'deaf') {
-      consumedThrough = e.results.length - 1
+      consumedThrough = Math.max(consumedThrough, e.results.length - 1)
       reset()
+      quietAt = null
       return
     }
     // Result indices belong to one recognizer session. Ignore final revisions of
     // an interim already submitted, but accept identical words at a NEW index.
-    if (e.results.length - 1 <= consumedThrough) return
-    const previousText = `${settled} ${interim}`
-    let fresh = ''
-    interim = ''
+    if (e.results.length - 1 <= consumedThrough && !results.size) return
+    const previousText = transcript()
+    lastResultIndex = e.results.length - 1
+    const updates = new Map<number, ResultChunk>()
+    let newInterim = false
     let newFinal = false
     for (let i = Math.max(e.resultIndex, consumedThrough + 1); i < e.results.length; i++) {
-      lastResultIndex = Math.max(lastResultIndex, i)
-      const chunk = e.results[i][0].transcript as string
-      if (e.results[i].isFinal) {
-        if (!finalResults.has(i)) {
-          fresh += `${chunk} `
-          finalResults.add(i)
-          newFinal = true
-        }
-      } else interim += chunk
+      if (results.get(i)?.final) continue
+      const chunk = { text: e.results[i][0].transcript as string, final: Boolean(e.results[i].isFinal) }
+      updates.set(i, chunk)
+      if (chunk.final) newFinal = true
+      else if (chunk.text.trim()) newInterim = true
     }
-    const heard = `${settled}${fresh} ${interim}`.replace(/\s+/g, ' ').trim()
-    if (!heard) return
-    if (isEcho(`${fresh} ${interim}`, speakingNow())) {
-      interim = ''
+    // Filter new words before committing them to the utterance. Unchanged
+    // earlier entries must survive callbacks beginning at a later resultIndex.
+    const fresh = [...updates.values()].map(chunk => chunk.text).join(' ')
+    if (fresh.trim() && isEcho(fresh, speakingNow())) return
+    for (const [i, chunk] of updates) results.set(i, chunk)
+    // The browser may withdraw trailing interim results by shortening its list.
+    for (const [i, chunk] of results) {
+      if (i >= e.results.length && !chunk.final) results.delete(i)
+    }
+    const full = transcript()
+    if (!full) {
+      clearSilence()
       return
     }
 
     // Prefer speech-end events; transcript activity is the fallback clock.
     // Merely marking the same words final must not restart the quiet deadline.
-    if (interim) speechEnded = false
-    if (!speechEnded && (quietAt === null || interim || (newFinal && norm(heard) !== norm(previousText)))) {
+    if (newInterim) speechEnded = false
+    if (!speechEnded && (quietAt === null || newInterim || (newFinal && norm(full) !== norm(previousText)))) {
       quietAt = performance.now()
     }
     // Some engines provide a final result without a matching speech-end event.
     if (newFinal) speechActive = false
 
-    settled += fresh
-    const full = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
     if (!started || (mode === 'guard' && !barged)) {
       const words = full.split(/\s+/).filter(Boolean).length
       if (mode === 'guard') {
@@ -619,13 +626,15 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
     if (stopped || running) return
     rec = new Ctor()
     const current = rec
+    carried.push(...ordered())
+    results.clear()
     consumedThrough = -1
     lastResultIndex = -1
-    finalResults.clear()
     rec.continuous = true
     rec.interimResults = true
     rec.lang = 'en-GB'
     rec.onstart = () => {
+      if (stopped || rec !== current) return
       running = true
       diag.running = true
       diag.sessions++
@@ -649,6 +658,7 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
       bumpSilence()
     }
     rec.onerror = (ev: any) => {
+      if (stopped || rec !== current) return
       diag.lastError = String(ev.error ?? '')
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         stopped = true

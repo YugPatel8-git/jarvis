@@ -94,6 +94,147 @@ async function harness({ premium = false, guard = false } = {}) {
   }
 }
 
+for (const final of [false, true]) test(`later resultIndex preserves earlier interim text (later final=${final})`, async () => {
+  const h = await harness()
+  h.rec.result('Please open', { index: 0, final: false })
+  h.rec.result('Chrome', { index: 1, final })
+  assert.equal(h.partials.at(-1), 'Please open Chrome')
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome'])
+  h.voice.stop()
+})
+
+test('multiple interim indices survive later updates and finalize in order exactly once', async () => {
+  const h = await harness()
+  h.rec.result('  Please   open', { final: false })
+  h.rec.result('the browser', { final: false })
+  h.rec.result('now  ', { final: false })
+  h.rec.result('Chrome', { index: 1, final: false })
+  assert.equal(h.partials.at(-1), 'Please open Chrome now')
+  h.rec.result('Please open', { index: 0 })
+  h.rec.result('Chrome', { index: 1 })
+  h.rec.result('now.', { index: 2 })
+  h.rec.result('now.', { index: 2 })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome now.'])
+  h.voice.stop()
+})
+
+test('earlier final and later interim are retained when the interim is revised', async () => {
+  const h = await harness()
+  h.rec.result('Please open')
+  h.rec.result('the browser', { final: false })
+  h.rec.result('Chrome', { index: 1, final: false })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome'])
+  h.voice.stop()
+})
+
+test('separate final chunks gain spaces without duplicating repeated callbacks', async () => {
+  const h = await harness()
+  h.rec.result('Please')
+  h.rec.result('open')
+  h.rec.result('Chrome')
+  h.rec.onresult({ resultIndex: 0, results: h.rec.results })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome'])
+  h.voice.stop()
+})
+
+test('resumed speech preserves earlier interim indices and resets the deadline', async () => {
+  const h = await harness()
+  h.rec.result('Please open', { final: false })
+  await h.time.advance(850)
+  h.rec.onspeechstart()
+  await h.time.advance(1000)
+  assert.equal(h.turns.length, 0)
+  h.rec.result('Chrome', { final: false })
+  h.rec.onspeechend()
+  await h.time.advance(899)
+  assert.equal(h.turns.length, 0)
+  await h.time.advance(1)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome'])
+  h.voice.stop()
+})
+
+test('restart carries final and interim text once across new session indices', async () => {
+  const h = await harness(), old = h.rec
+  old.result('Please')
+  old.result('open', { final: false })
+  await h.time.advance(100)
+  old.onend()
+  await h.time.advance(80)
+  old.result('stale words', { index: 1 })
+  old.onspeechstart()
+  old.onspeechend()
+  old.onstart()
+  old.onerror({ error: 'not-allowed' })
+  h.rec.result('Chrome', { index: 0 })
+  h.rec.result('Chrome', { index: 0 })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome'])
+  h.rec.result('Chrome.', { index: 0 })
+  await h.time.advance(1000)
+  assert.equal(h.turns.length, 1)
+  h.voice.stop()
+})
+
+test('restart with no new words preserves the pending utterance and deadline', async () => {
+  const h = await harness()
+  h.rec.result('Please open', { final: false })
+  h.rec.result('Chrome', { final: false })
+  await h.time.advance(100)
+  h.rec.onend()
+  await h.time.advance(799)
+  assert.equal(h.turns.length, 0)
+  await h.time.advance(1)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome'])
+  h.voice.stop()
+})
+
+test('consumed indices cannot leak late revisions into the next turn', async () => {
+  const h = await harness()
+  h.rec.result('Please open', { final: false })
+  h.rec.result('Chrome', { final: false })
+  await h.time.advance(900)
+  h.rec.result('Chrome.', { index: 1 })
+  await h.time.advance(1000)
+  assert.equal(h.turns.length, 1)
+  h.rec.result('Yes', { index: 2, final: false })
+  h.rec.result('Please open', { index: 0 })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome', 'Yes'])
+  h.voice.stop()
+})
+
+test('withdrawn interim suffix is removed without losing earlier active results', async () => {
+  const h = await harness()
+  h.rec.result('Please open', { final: false })
+  h.rec.result('Chrome', { final: false })
+  h.rec.result('tomorrow', { final: false })
+  h.rec.results.length = 2
+  h.rec.onresult({ resultIndex: 2, results: h.rec.results })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome'])
+  h.rec.result('Yes', { index: 2 })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Please open Chrome', 'Yes'])
+  h.voice.stop()
+})
+
+test('withdrawing all interim results cancels submission and allows a replacement', async () => {
+  const h = await harness()
+  h.rec.result('Uncertain words', { final: false })
+  h.rec.results.length = 0
+  h.rec.onresult({ resultIndex: 0, results: h.rec.results })
+  await h.time.advance(1000)
+  assert.equal(h.turns.length, 0)
+  h.rec.result('Yes', { index: 0 })
+  await h.time.advance(900)
+  assert.deepEqual(h.turns.map(t => t.text), ['Yes'])
+  h.voice.stop()
+})
+
 test('browser normal sentence submits once at 900ms, without an assembler delay', async () => {
   const h = await harness()
   h.rec.result('Explain the current project')
@@ -103,10 +244,11 @@ test('browser normal sentence submits once at 900ms, without an assembler delay'
   h.voice.stop()
 })
 
-test('a 400ms hesitation and later continuation keep one browser turn', async () => {
+for (const pause of [300, 400, 500, 850]) test(`a ${pause}ms hesitation and later continuation keep one browser turn`, async () => {
   const h = await harness()
   h.rec.result('Please open', { final: false })
-  await h.time.advance(400)
+  await h.time.advance(pause)
+  assert.equal(h.turns.length, 0)
   h.rec.result('Please open Chrome', { index: 0, final: false })
   await h.time.advance(899); assert.equal(h.turns.length, 0)
   await h.time.advance(1); assert.equal(h.turns[0].text, 'Please open Chrome')

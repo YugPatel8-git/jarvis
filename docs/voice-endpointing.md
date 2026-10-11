@@ -1,6 +1,6 @@
 # Voice endpoint timing
 
-## Before this pass
+## Before the single-deadline implementation
 
 - VAD: 110ms sustained onset, 650ms quiet before recording a segment ends,
   20-second maximum segment. Transcription then runs through the existing bridge.
@@ -11,7 +11,7 @@
 - The 350ms playback echo guard, 14-second initial listening window, and
   11-second follow-up window are separate from endpointing.
 
-## After this pass
+## Current timing
 
 The normal silence deadline is **900ms total**. Explicitly unfinished wording
 gets **1000ms total**. Short commands such as Stop, Yes, and Open Chrome use
@@ -32,6 +32,12 @@ late final revisions from submitting a second turn, while new indices can still
 submit repeated commands with identical wording. Stale recognizer instances and
 callbacks after stop cannot submit.
 
+Browser transcript chunks are stored by recognition-result index. Later callbacks
+update their own interim entries while preserving earlier entries; finalization
+replaces an interim in place. Assembly joins chunks in index order with spaces.
+Pending words carry across recognizer restarts separately from new session indices.
+Withdrawn interim suffixes are removed when the browser shortens its result list.
+
 The existing 110ms onset confirmation and echo/barge-in guards remain. No longer
 minimum-duration filter was added, preserving brief commands. No new model call,
 audio graph, signal analysis, polling interval, dependency, or rendering work was
@@ -40,10 +46,12 @@ personality, routing, screen sharing, and security sources were not edited.
 
 ## Validation and limits
 
-Eighteen deterministic tests in `scripts/test-voice-endpoint.mjs` cover normal
-900ms submission, 400ms hesitation, resumed speech, delayed finals, one-word
+Thirty-two deterministic tests in `scripts/test-voice-endpoint.mjs` cover normal
+900ms submission, 300-850ms hesitation, resumed speech, delayed finals, one-word
 commands, repeated commands, barge-in, stop, stale recognizer callbacks,
-transcription latency/queueing, and real VAD logic with simulated energy.
+transcription latency/queueing, and real VAD logic with simulated energy. They also
+cover multiple interim/final result indices, ordered spacing, final replacement,
+pending text across restarts, consumed-turn isolation, and withdrawn interim text.
 The existing TTS tests separately cover cancellation and stale audio prevention.
 The browser smoke-test recognizer mock now follows cumulative session result
 indices, matching the browser API.
