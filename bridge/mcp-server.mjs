@@ -16,11 +16,12 @@ const tool=(name,description,schema)=>server.tool(name,description,schema,async(
     return {content:[{type:'text',text:a.source==='screen'?'Current user-shared screen frame.':'Camera capture requested by the user.'},{type:'image',data:v.data,mimeType:v.mimeType??'image/jpeg'}]}
   }
   if(name==='vision'&&v?.unchanged)return {content:[{type:'text',text:'The shared screen is unchanged from the previous frame; use the previous image context.'}]}
-  if(name==='browser'&&v?.image)return {content:[{type:'text',text:'Screenshot of the current isolated Chrome tab.'},{type:'image',data:v.image,mimeType:v.mimeType??'image/jpeg'}]}
+  if(name==='browser'&&v?.image)return {content:[{type:'text',text:'Screenshot of the connected browser tab.'},{type:'image',data:v.image,mimeType:v.mimeType??'image/jpeg'}]}
   return response(v)
 })
-tool('browser','Control isolated Chrome. After a model-driven search, prefer search_results for at most five title/URL/snippet records; use read for cleaned visible article text.',{
-  operation:z.enum(['open','navigate','search','youtube_search','search_results','tabs','close','close_all','next_tab','previous_tab','activate','click','type','scroll','read','screenshot']),
+tool('browser','Control Chrome or Brave through local DevTools. capabilities checks installed and connected states without launching. Reuse accessible sessions; ordinary browser profiles are not automatically accessible. youtube_music opens the site or Library and can attempt verified library playback; inspect its message and playing flag. Report actual connection or sign-in failures, not a blanket lack of browser controls. After a search, prefer search_results for five title/URL/snippet records; read returns visible page text.',{
+  operation:z.enum(['capabilities','youtube_music','open','navigate','search','youtube_search','search_results','tabs','close','close_all','next_tab','previous_tab','activate','click','type','scroll','read','screenshot']),
+  browser:z.enum(['chrome','brave']).optional(),action:z.enum(['open','library','play_library']).optional(),
   url:z.string().optional(),query:z.string().optional(),tabId:z.string().optional(),selector:z.string().optional(),label:z.string().optional(),value:z.string().optional(),y:z.number().optional(),
 })
 tool('shell','Run a normal local executable with structured arguments, or a PowerShell script. The router blocks high-risk execution for approval.',{

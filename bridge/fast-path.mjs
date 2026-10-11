@@ -23,8 +23,16 @@ function say(kind) {
 export function matchFastPath(input) {
   const raw=clean(input), lower=raw.toLowerCase(), app=appCommand(lower)
   let m
-  if(app==='open:chrome')return result('browser',{operation:'open',url:'https://www.google.com/'},say('chromeOpen'))
-  if(app==='close:chrome')return result('browser',{operation:'close_all'},say('chromeClose'))
+  if(/^(?:(?:don't|do not|do|can) you (?:have|use)|what are your) browser controls(?: in this session)?$/i.test(raw)||/^(?:can you control (?:the |my )?browser|browser capabilities)$/i.test(raw))return result('browser',{operation:'capabilities'},'')
+  if(lower==='open brave')return result('browser',{operation:'open',browser:'brave',url:'https://www.google.com/'},'Brave is open, sir.')
+  if((m=/^open brave and search(?: for)?\s+(.+)$/i.exec(raw)))return result('browser',{operation:'search',browser:'brave',query:m[1].trim()},`Brave has opened a search for ${m[1].trim()}, sir.`)
+  if((m=/^(?:open )?youtube music(?: and (?:open|play) my library|(?: my)? library)?$/i.exec(raw))){
+    const action=/play my library/i.test(raw)?'play_library':/library/i.test(raw)?'library':'open'
+    return result('browser',{operation:'youtube_music',action},'')
+  }
+  if(/^play my (?:youtube music library|library on youtube music)$/i.test(raw))return result('browser',{operation:'youtube_music',action:'play_library'},'')
+  if(app==='open:chrome')return result('browser',{operation:'open',browser:'chrome',url:'https://www.google.com/'},say('chromeOpen'))
+  if(app==='close:chrome')return result('browser',{operation:'close_all',browser:'chrome'},say('chromeClose'))
   if(app==='open:youtube')return result('browser',{operation:'open',url:'https://www.youtube.com/'},say('youtubeOpen'))
   if((m=/^(?:search google for|google)\s+(.+)$/i.exec(raw)))return result('browser',{operation:'search',query:m[1].trim()},`Searching Google for ${m[1].trim()}, sir.`)
   if((m=/^(?:search youtube for|youtube search(?: for)?)\s+(.+)$/i.exec(raw)))return result('browser',{operation:'youtube_search',query:m[1].trim()},`Searching YouTube for ${m[1].trim()}, sir.`)

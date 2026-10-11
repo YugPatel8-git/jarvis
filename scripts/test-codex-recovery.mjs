@@ -53,7 +53,7 @@ test('a crashed persistent app-server restarts once and starts a fresh thread if
   } finally { conversation.close() }
 })
 
-function activeHarness() {
+function activeHarness({mcpStatus,failMcp=false}={}) {
   const children = [], requests = [], deltas = []
   let turn = 0
   const conversation = new CodexAppServerConversation({
@@ -68,6 +68,10 @@ function activeHarness() {
         if (!m.id) return
         requests.push(m)
         if (m.method === 'model/list' || m.method === 'turn/start') return
+        if(m.method==='mcpServerStatus/list'){
+          queueMicrotask(()=>failMcp?child.stdout.write(JSON.stringify({id:m.id,error:{message:'unsupported status lookup'}})+'\n'):child.reply(m,mcpStatus??{}))
+          return
+        }
         queueMicrotask(() => child.reply(m, m.method.startsWith('thread/') ? { thread: { id: 'thread', model: 'gpt-5.6-sol' } } : {}))
       } }
       child.kill = () => { child.stdout.end(); child.stderr.end() }
@@ -89,6 +93,36 @@ test('optional model catalog never blocks thread warmup', async () => {
   const h = activeHarness()
   try { await h.conversation.warm(); assert.equal(h.conversation.state, 'ready') }
   finally { h.conversation.close() }
+})
+
+test('Codex gets verified thread MCP evidence in the same main turn',async()=>{
+  const h=activeHarness({mcpStatus:{data:[{name:'jarvis',runtimeStatus:'connected',tools:{browser:{name:'browser'},shell:{name:'shell'}}}]}})
+  try{
+    await h.conversation.warm()
+    const opening=h.requests.find(m=>m.method==='thread/start')
+    assert.ok(opening.params.config.mcp_servers.jarvis.required)
+    assert.equal(opening.params.sandbox,'read-only')
+    assert.match(opening.params.developerInstructions,/independently of disabled built-in/)
+    assert.equal(h.requests.find(m=>m.method==='mcpServerStatus/list').params.threadId,'thread')
+    const answer=h.conversation.ask('Inspect the current browser page')
+    const turn=await h.submitted()
+    assert.match(turn.params.input[0].text,/registered tools: browser, shell/)
+    assert.equal(h.requests.filter(m=>m.method==='turn/start').length,1)
+    const id=h.accept(turn)
+    await new Promise(r=>setImmediate(r))
+    h.children[0].event('turn/completed',{threadId:'thread',turn:{id,status:'completed'}})
+    await answer
+  }finally{h.conversation.close()}
+})
+
+test('unsupported MCP status leaves capability unverified without disabling Codex',async()=>{
+  const h=activeHarness({failMcp:true})
+  try{
+    await h.conversation.warm()
+    await new Promise(r=>setImmediate(r))
+    assert.equal(h.conversation.state,'ready')
+    assert.match(h.conversation.browserEvidence,/unverified/)
+  }finally{h.conversation.close()}
 })
 
 test('cancel during submission interrupts the actual turn and stale deltas cannot enter the next answer', async () => {

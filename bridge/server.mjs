@@ -169,7 +169,7 @@ wss.on('connection',(socket,req)=>{
       const localStarted=performance.now()
       void route(fast.tool,fast.args,currentAsk).then(value=>{
         health.timing('localCommand',performance.now()-localStarted)
-        const spoken=value?.denied?value.message:fast.spoken
+        const spoken=value?.denied?value.message:fast.tool==='browser'&&value?.message?value.message:fast.spoken
         if(spoken)send({type:'text',delta:spoken,ask:currentAsk})
         send({type:'done',text:spoken||'',ask:currentAsk,local:true})
       }).catch(e=>send({type:'error',message:`${fast.tool==='shell'&&/npm run build/.test(fast.args.args?.join(' ')??'')?'The build failed, sir. ':''}${String(e?.message??e)}`,ask:currentAsk,local:true}))

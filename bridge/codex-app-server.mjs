@@ -4,6 +4,7 @@ import { performance } from 'node:perf_hooks'
 import process from 'node:process'
 import { CodexConversation as ExecFallback, codexModelLabel } from './codex.mjs'
 import { stopProcessTree } from './process.mjs'
+import { BROWSER_INSTRUCTIONS, mcpBrowserEvidence } from './browser-capabilities.mjs'
 
 const TURN_TIMEOUT_MS = Number(process.env.JARVIS_TURN_TIMEOUT_MS ?? 120_000)
 const MODEL = process.env.JARVIS_CODEX_MODEL?.trim() || 'gpt-5.6-sol'
@@ -49,6 +50,7 @@ export class CodexAppServerConversation {
     this.threadId = null; this.turnId = null; this.active = null; this.starting = null; this.queuedAsk = null
     this.interrupting = null; this.nextWarmAt = 0; this.restartAttempts = 0; this.restartTimer = null; this.readyAt = 0; this.closing = false
     this.state = 'warming'; this.model = MODEL; this.supportedEfforts = []
+    this.browserEvidence = 'JARVIS MCP tool discovery is pending; browser access is not yet verified.'
     this.turns = 0; this.contextChars = 0; this.recent = []
     this.fallback = new ExecFallback({ cwd, onText, onTool, routerToken })
   }
@@ -97,11 +99,19 @@ export class CodexAppServerConversation {
   async #openThread(resume = false) {
     const config = { mcp_servers: { jarvis: { command: process.execPath, args: [mcpPath()], env_vars: ['JARVIS_ROUTER_TOKEN', 'JARVIS_BRIDGE_PORT'], required: true, default_tools_approval_mode: 'approve' } }, features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])) }
     const continuity = !resume && this.recent.length ? `\nBounded recent context from the prior thread; treat it as potentially stale:\n${this.recent.map((x) => `User: ${x.prompt}\nJARVIS: ${x.answer}`).join('\n').slice(-RECENT_CHARS)}` : ''
-    const common = { cwd: this.cwd, approvalPolicy: 'never', sandbox: 'read-only', model: this.model, developerInstructions: PERSONA + continuity, config }
+    const common = { cwd: this.cwd, approvalPolicy: 'never', sandbox: 'read-only', model: this.model, developerInstructions: PERSONA + '\n' + BROWSER_INSTRUCTIONS + continuity, config }
     const result = resume
       ? await this.#request('thread/resume', { threadId: this.threadId, ...common })
       : await this.#request('thread/start', { ...common, serviceName: 'jarvis_local' })
     this.threadId = result.thread.id; this.model = result.thread.model ?? this.model
+    // Query the actual thread's MCP catalog without blocking first-turn latency.
+    const child=this.child, threadId=this.threadId
+    this.browserEvidence='JARVIS MCP tool discovery is pending; browser access is not yet verified.'
+    void this.#request('mcpServerStatus/list',{threadId,limit:100}).then(status=>{
+      if(this.child===child&&this.threadId===threadId)this.browserEvidence=mcpBrowserEvidence(status)
+    }).catch(()=>{
+      if(this.child===child&&this.threadId===threadId)this.browserEvidence='JARVIS MCP status lookup failed or is unsupported by this Codex version. Availability is unverified; inspect the exposed tool list and report actual tool errors.'
+    })
     const activeModel = this.modelCatalog?.find((x) => x.model === this.model || x.id === this.model)
     this.supportedEfforts = activeModel?.supportedReasoningEfforts?.map((x) => x.reasoningEffort) ?? this.supportedEfforts
   }
@@ -138,7 +148,7 @@ export class CodexAppServerConversation {
       const submitted = performance.now()
       const effort = this.#effort(prompt)
       this.onRouting({ model: this.model, effort })
-      active.submission = this.#request('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt, text_elements: [] }], effort, summary: 'none', approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
+      active.submission = this.#request('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: `${prompt}\n[Runtime tool evidence: ${this.browserEvidence}]`, text_elements: [] }], effort, summary: 'none', approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
       const result = await active.submission
       if (this.active === active) { active.turnId = result.turn.id; this.turnId = result.turn.id; this.onTiming('requestSubmissionMs', performance.now() - submitted) }
       return await completion
@@ -194,7 +204,7 @@ export class CodexAppServerConversation {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        if (method !== 'model/list' && method !== 'turn/interrupt') {
+        if (!['model/list','mcpServerStatus/list','turn/interrupt'].includes(method)) {
           this.onFailure('turn-timeout')
           this.#stopProcess()
           this.state = 'fallback'; this.nextWarmAt = Date.now() + 30_000; this.onState('fallback')

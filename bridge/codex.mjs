@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import process from 'node:process'
 import { stopProcessTree } from './process.mjs'
+import { BROWSER_INSTRUCTIONS } from './browser-capabilities.mjs'
 
 const TURN_TIMEOUT_MS = Number(process.env.JARVIS_TURN_TIMEOUT_MS ?? 120_000)
 const MODEL = process.env.JARVIS_CODEX_MODEL?.trim() || 'gpt-5.6-sol'
@@ -104,7 +105,8 @@ export class CodexConversation {
     const continuity=this.recent.length
       ? '\n\nBounded recent context from the prior session; treat it as potentially stale:\n'+this.recent.map(x=>`User: ${x.prompt}\nJARVIS: ${x.answer}`).join('\n').slice(-RECENT_CHARS)
       : ''
-    const input = resuming ? prompt : `${PERSONA}${continuity}\n\nUser: ${prompt}`
+    const browserContext=`\n[Browser tool guidance: ${BROWSER_INSTRUCTIONS} This exec fallback has no independent MCP status snapshot; verify against its exposed tools and results.]`
+    const input = resuming ? prompt+browserContext : `${PERSONA}${continuity}\n\nUser: ${prompt}${browserContext}`
     child.stdin.end(input, 'utf8')
 
     let answer = ''

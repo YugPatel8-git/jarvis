@@ -110,7 +110,7 @@ test('phrase hints are bounded public terms and unsupported engines are harmless
 const serverSource = ts.transpileModule(readFileSync(new URL('../bridge/server.mjs', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
-function bridgeHarness() {
+function bridgeHarness(toolResult=()=>({})) {
   let connection, handle
   const prompts = [], tools = [], logs = [], sttForms = [], frames = []
   const server = { on() {}, listen(_port, _host, fn) { fn() } }
@@ -128,7 +128,7 @@ function bridgeHarness() {
       if (id === './codex-app-server.mjs') return {CodexAppServerConversation:class {
         state='ready'; warm(){return Promise.resolve()} cancel(){} ask(prompt){prompts.push(prompt);return Promise.resolve('Fixture answer')}
       },appServerModelLabel:()=> 'fixture'}
-      if (id === './router.mjs') return {createRouter:()=>async(tool,args)=>{tools.push({tool,args});return {}}}
+      if (id === './router.mjs') return {createRouter:()=>async(tool,args)=>{tools.push({tool,args});return toolResult(tool,args)}}
       if (id === './fast-path.mjs') return {matchFastPath}
       if (id === './speech-normalization.mjs') return speech
       if (id === './fish-tts.mjs') return {fishConfigured:()=>false}
@@ -159,6 +159,25 @@ test('bridge routes normalized speech locally with zero model calls', async () =
   assert.deepEqual(h.tools[1].args.args,['status','--short'])
   assert.match(h.tools[2].args.args[0],/Downloads$/)
   assert.equal(h.prompts.length,0)
+})
+
+test('browser fast paths use tool-reported outcomes with zero model calls',async()=>{
+  const h=bridgeHarness((_tool,args)=>args.operation==='capabilities'?{message:'Brave installed; automation not connected.'}:args.operation==='youtube_music'?{message:'YouTube Music needs sign-in.',playing:false}:{})
+  for(const text of ['Open Brave','Open Brave and search YouTube Music','Open YouTube Music and play my library',"Don't you have browser controls?"])await h.ask(text,false)
+  assert.equal(h.tools.length,4)
+  assert.equal(h.prompts.length,0)
+  assert.deepEqual(h.frames.filter(f=>f.type==='done').slice(-2).map(f=>f.text),['YouTube Music needs sign-in.','Brave installed; automation not connected.'])
+})
+
+test('browser failure and approval denial never produce a success response',async()=>{
+  const denied=bridgeHarness(()=>({denied:true,message:'Action declined.'}))
+  await denied.ask('Open Brave',false)
+  assert.equal(denied.frames.find(f=>f.type==='done').text,'Action declined.')
+  const failed=bridgeHarness(()=>{throw new Error('Brave executable was not found.')})
+  await failed.ask('Open Brave',false)
+  assert.match(failed.frames.find(f=>f.type==='error').message,/Brave executable was not found/)
+  assert.equal(failed.frames.some(f=>f.type==='done'),false)
+  assert.equal(failed.prompts.length,0)
 })
 
 test('main request carries both representations exactly once; typed text is unchanged', async () => {
